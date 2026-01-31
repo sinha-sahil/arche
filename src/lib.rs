@@ -1,5 +1,6 @@
 pub mod aws;
 pub(crate) mod config;
+pub mod crypto;
 pub mod database;
 pub mod error;
 pub mod gcp;

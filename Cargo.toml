@@ -45,6 +45,10 @@ tokio = { version = "1.4.0", features = ["rt", "rt-multi-thread", "macros"] }
 aws-sdk-sesv2 = "1.111.0"
 aws-sdk-kms = "1.68.0"
 base64 = "0.22.1"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+pbkdf2 = "0.12"
+sha1 = "0.10"
 
 [dev-dependencies]
 cargo-husky = { version = "1", features = ["user-hooks"] }
