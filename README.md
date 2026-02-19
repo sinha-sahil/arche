@@ -56,6 +56,14 @@ JWT utilities for authentication and authorization:
 - Token expiry helpers
 - Custom claims support
 
+### `csv`
+
+Async CSV processing via a single reusable `CsvClient`:
+
+- **Batch**: `read_all`, `read_file`, `write_all`, `write_file` — load everything at once
+- **Streaming**: `reader` / `writer` factories for memory-efficient record-by-record I/O
+- Configurable delimiter, quoting, escaping, headers, and more
+
 ### `error`
 
 Axum-compatible error handling:
@@ -205,6 +213,83 @@ let tokens = generate_tokens(
 
 // Verify token
 let token_data = verify_token::<Claims>(&token, secret, Some("audience".into()))?;
+```
+
+### CSV (`arche::csv`)
+
+Async CSV processing powered by `csv-async`. Create one `CsvClient`, reuse it everywhere:
+
+```rust
+use arche::csv::CsvClient;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct Record {
+    name: String,
+    age: u32,
+    city: String,
+}
+
+// Default config (comma-delimited, with headers)
+let csv = CsvClient::new();
+
+// Or customize
+let csv = CsvClient::new()
+    .delimiter(b';')
+    .has_headers(true)
+    .flexible(true);
+```
+
+#### Batch reading
+
+```rust
+// From bytes
+let data = b"name,age,city\nAlice,30,NYC\nBob,25,LA";
+let records: Vec<Record> = csv.read_all(data.as_slice()).await?;
+
+// From a file
+let records: Vec<Record> = csv.read_file("data.csv").await?;
+
+// Raw string records (no serde)
+let raw_records = csv.read_records(data.as_slice()).await?;
+```
+
+#### Batch writing
+
+```rust
+#[derive(Serialize)]
+struct Output {
+    name: String,
+    score: f64,
+}
+
+let records = vec![
+    Output { name: "Alice".into(), score: 95.5 },
+    Output { name: "Bob".into(), score: 87.0 },
+];
+
+// Write to in-memory bytes
+let bytes: Vec<u8> = csv.write_all(&records).await?;
+
+// Write to a file
+csv.write_file("output.csv", &records).await?;
+```
+
+#### Streaming (memory-efficient)
+
+```rust
+// Record-by-record reading
+let mut stream = csv.reader_from_file("large.csv").await?;
+while let Some(result) = stream.next_deserialized::<Record>().await {
+    let record = result?;
+    // process one record at a time
+}
+
+// Record-by-record writing
+let mut writer = csv.writer_to_file("output.csv").await?;
+writer.serialize(&Output { name: "Alice".into(), score: 95.5 }).await?;
+writer.write_fields(["Bob", "87.0"]).await?;
+writer.finish().await?;
 ```
 
 ### Error (`arche::error`)
@@ -312,6 +397,12 @@ JWT utilities for authentication and authorization:
 - Token expiry helpers
 - Custom claims support
 
+### `csv`
+Async CSV processing via a single reusable `CsvClient`:
+- **Batch**: `read_all`, `read_file`, `write_all`, `write_file` — load everything at once
+- **Streaming**: `reader` / `writer` factories for memory-efficient record-by-record I/O
+- Configurable delimiter, quoting, escaping, headers, and more
+
 ### `error`
 Axum-compatible error handling:
 - `AppError` enum with common HTTP error variants
@@ -457,74 +548,80 @@ let token_data = verify_token::<Claims>(&token, secret, Some("audience".into()))
 
 ---
 
-### Error (`arche::error`)
+### CSV (`arche::csv`)
+
+Async CSV processing powered by `csv-async`. Create one `CsvClient`, reuse it everywhere:
 
 ```rust
-use arche::error::AppError;
-use axum::response::IntoResponse;
+use arche::csv::CsvClient;
+use serde::{Deserialize, Serialize};
 
-async fn handler() -> Result<impl IntoResponse, AppError> {
-    Err(AppError::Unauthorized)
+#[derive(Deserialize)]
+struct Record {
+    name: String,
+    age: u32,
+    city: String,
 }
 
-// Custom errors with details
-let error = AppError::bad_request(
-    Some(errors_map),
-    Some("Invalid input".into()),
-    Some("Field validation failed".into()),
-);
+// Default config (comma-delimited, with headers)
+let csv = CsvClient::new();
+
+// Or customize
+let csv = CsvClient::new()
+    .delimiter(b';')
+    .has_headers(true)
+    .flexible(true);
 ```
 
-**Error Variants:**
-- `Unauthorized` → 401
-- `BadRequest` → 400
-- `UnprocessableEntity` → 422
-- `DBError` → 500
-- `InternalError` → 500
-- `Unavailable` → 503
-
----
-
-### Utils (`arche::utils`)
+#### Batch reading
 
 ```rust
-use arche::utils::{validate_timestamp, FromOffsetDateTime, PaginationParams};
-use sqlx::types::time::OffsetDateTime;
+// From bytes
+let data = b”name,age,city\nAlice,30,NYC\nBob,25,LA”;
+let records: Vec<Record> = csv.read_all(data.as_slice()).await?;
 
-// Timestamp validation
-let is_future = validate_timestamp(timestamp, false);
+// From a file
+let records: Vec<Record> = csv.read_file(“data.csv”).await?;
 
-// DateTime conversion
-let iso_string = offset_dt.to_iso_string()?;
-
-// Pagination
-let params = PaginationParams {
-    page_number: Some(1),
-    page_size: Some(20),
-};
+// Raw string records (no serde)
+let raw_records = csv.read_records(data.as_slice()).await?;
 ```
 
----
+#### Batch writing
 
-## What arche is *not*
+```rust
+#[derive(Serialize)]
+struct Output {
+    name: String,
+    score: f64,
+}
 
-- ❌ A framework that replaces Axum
-- ❌ A code generator or project template
-- ❌ A monolithic abstraction over third-party libraries
-- ❌ A “do-everything” utils crate
+let records = vec![
+    Output { name: “Alice”.into(), score: 95.5 },
+    Output { name: “Bob”.into(), score: 87.0 },
+];
 
-`arche` favors composition over abstraction.
+// Write to in-memory bytes
+let bytes: Vec<u8> = csv.write_all(&records).await?;
 
----
+// Write to a file
+csv.write_file(“output.csv”, &records).await?;
+```
 
-## Design principles
+#### Streaming (memory-efficient)
 
-- **Explicit over implicit**
-- **Composition over inheritance**
-- **Thin wrappers over official SDKs**
-- **Production-first defaults**
-- **No global state**
-- **Async-first**
+```rust
+// Record-by-record reading
+let mut stream = csv.reader_from_file(“large.csv”).await?;
+while let Some(result) = stream.next_deserialized::<Record>().await {
+    let record = result?;
+    // process one record at a time
+}
 
----
+// Record-by-record writing
+let mut writer = csv.writer_to_file(“output.csv”).await?;
+writer.serialize(&Output { name: “Alice”.into(), score: 95.5 }).await?;
+writer.write_fields([“Bob”, “87.0”]).await?;
+writer.finish().await?;
+```
 
