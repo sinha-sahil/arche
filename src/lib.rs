@@ -5,6 +5,7 @@ pub mod csv;
 pub mod database;
 pub mod error;
 pub mod gcp;
+pub mod json;
 pub mod jwt;
 pub mod sockets;
 pub mod utils;
