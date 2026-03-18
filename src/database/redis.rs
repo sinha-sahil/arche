@@ -28,10 +28,9 @@ pub async fn get_redis_pool(
     };
 
     let redis_conn_manager = bb8_redis::RedisConnectionManager::new(redis_url).map_err(|e| {
-        AppError::config_error(
-            "connection_manager".to_string(),
-            None,
+        AppError::internal_error(
             format!("Failed to create Redis connection manager: {}", e),
+            None,
         )
     })?;
 
@@ -39,13 +38,7 @@ pub async fn get_redis_pool(
         .max_size(max_conn)
         .build(redis_conn_manager)
         .await
-        .map_err(|e| {
-            AppError::config_error(
-                "pool".to_string(),
-                None,
-                format!("Failed to create Redis pool: {}", e),
-            )
-        })
+        .map_err(|e| AppError::internal_error(format!("Failed to create Redis pool: {}", e), None))
 }
 
 pub async fn _get_redis_conn(

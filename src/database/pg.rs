@@ -26,10 +26,9 @@ fn get_credentials(config: &PgConfig) -> Result<PgCredentials, AppError> {
 
     if let Some(credentials_str) = credentials_json {
         let credentials_json = serde_json::from_str::<Value>(&credentials_str).map_err(|e| {
-            AppError::config_error(
-                "credentials_json".to_string(),
-                Some("PG_CREDENTIALS".to_string()),
-                format!("Failed to parse credentials JSON: {}", e),
+            AppError::internal_error(
+                format!("Config error [credentials_json/PG_CREDENTIALS]: Failed to parse credentials JSON: {}", e),
+                None,
             )
         })?;
 
@@ -37,10 +36,9 @@ fn get_credentials(config: &PgConfig) -> Result<PgCredentials, AppError> {
             .get("username")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                AppError::config_error(
-                    "username".to_string(),
-                    Some("PG_CREDENTIALS".to_string()),
-                    "username not found in credentials JSON".to_string(),
+                AppError::internal_error(
+                    "Config error [username/PG_CREDENTIALS]: username not found in credentials JSON".to_string(),
+                    None,
                 )
             })?
             .to_string();
@@ -49,10 +47,9 @@ fn get_credentials(config: &PgConfig) -> Result<PgCredentials, AppError> {
             .get("password")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                AppError::config_error(
-                    "password".to_string(),
-                    Some("PG_CREDENTIALS".to_string()),
-                    "password not found in credentials JSON".to_string(),
+                AppError::internal_error(
+                    "Config error [password/PG_CREDENTIALS]: password not found in credentials JSON".to_string(),
+                    None,
                 )
             })?
             .to_string();
@@ -84,13 +81,7 @@ pub async fn get_pg_pool(config: impl Into<Option<PgConfig>>) -> Result<PgPool, 
         .max_connections(max_conn)
         .connect(&pg_url)
         .await
-        .map_err(|e| {
-            AppError::config_error(
-                "connection".to_string(),
-                None,
-                format!("Failed to create PG Pool: {}", e),
-            )
-        })
+        .map_err(|e| AppError::internal_error(format!("Failed to create PG Pool: {}", e), None))
 }
 
 pub async fn test_pg(pg_pool: sqlx::PgPool) -> Result<bool, AppError> {

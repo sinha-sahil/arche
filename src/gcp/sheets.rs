@@ -31,10 +31,12 @@ pub async fn get_sheets_client(
                 service = "google_sheets",
                 "Failed to read service account key"
             );
-            AppError::config_error(
-                "service_account_key".to_string(),
-                Some("GCP_SHEETS_KEY".to_string()),
-                format!("Failed to read GCP key: {}", e),
+            AppError::internal_error(
+                format!(
+                    "Config error [service_account_key/GCP_SHEETS_KEY]: Failed to read GCP key: {}",
+                    e
+                ),
+                None,
             )
         })?;
 
@@ -47,10 +49,9 @@ pub async fn get_sheets_client(
                 service = "google_sheets",
                 "Failed to build authenticator"
             );
-            AppError::config_error(
-                "authenticator".to_string(),
+            AppError::internal_error(
+                format!("Failed to build GCP Sheets authenticator: {}", e),
                 None,
-                format!("Failed to build GCP auth: {}", e),
             )
         })?;
 
@@ -62,10 +63,9 @@ pub async fn get_sheets_client(
                 service = "google_sheets",
                 "Failed to build HTTPS connector"
             );
-            AppError::config_error(
-                "https_connector".to_string(),
+            AppError::internal_error(
+                format!("Failed to build HTTPS connector for GCP Sheets: {}", e),
                 None,
-                format!("Failed to build HTTPS connector: {}", e),
             )
         })?
         .https_or_http()

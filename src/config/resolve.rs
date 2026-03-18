@@ -12,16 +12,16 @@ where
 
     match std::env::var(env_var) {
         Ok(value) => value.parse::<T>().map_err(|e| {
-            AppError::config_error(
-                field.to_string(),
-                Some(env_var.to_string()),
-                format!("Failed to parse value: {:?}", e),
+            AppError::internal_error(
+                format!("Config error [{field}/{env_var}]: Failed to parse value: {e:?}"),
+                None,
             )
         }),
-        Err(_) => Err(AppError::config_error(
-            field.to_string(),
-            Some(env_var.to_string()),
-            "Value not provided and environment variable not set".to_string(),
+        Err(_) => Err(AppError::internal_error(
+            format!(
+                "Config error [{field}/{env_var}]: Value not provided and environment variable not set"
+            ),
+            None,
         )),
     }
 }

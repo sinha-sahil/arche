@@ -68,9 +68,11 @@ Async CSV processing via a single reusable `CsvClient`:
 
 Axum-compatible error handling:
 
-- `AppError` enum with common HTTP error variants
-- Automatic `IntoResponse` conversion
-- Structured error responses with details
+- `AppError` enum with HTTP error variants covering 400, 401, 403, 404, 409, 422, 424, 500, and 503
+- Automatic `IntoResponse` conversion with structured JSON bodies
+- `InternalError` responses are sanitized by default (no leaked SQL, infra details)
+- Optional `verbose-errors` feature flag for dev/staging diagnostics
+- `DependencyFailed` variant for upstream service failures (OpenSearch, Shopify, S3, etc.)
 
 ### `utils`
 
@@ -302,22 +304,51 @@ async fn handler() -> Result<impl IntoResponse, AppError> {
     Err(AppError::Unauthorized)
 }
 
-// Custom errors with details
+// 400 — bad request with details
 let error = AppError::bad_request(
     Some(errors_map),
     Some("Invalid input".into()),
     Some("Field validation failed".into()),
 );
+
+// 404 — resource not found
+let error = AppError::not_found("client");
+
+// 409 — unique constraint violation
+let error = AppError::conflict("A client with this name already exists");
+
+// 424 — upstream dependency failed (retryable)
+let error = AppError::dependency_failed("opensearch", "index timeout");
+
+// 424 — upstream dependency failed (permanent)
+let error = AppError::dependency_failed_permanent("shopify", "invalid API key");
+
+// 500 — internal error (response body is sanitized by default)
+let error = AppError::internal_error("SQL error: ...".into(), None);
 ```
 
 **Error Variants:**
 
-- `Unauthorized` → 401
-- `BadRequest` → 400
-- `UnprocessableEntity` → 422
-- `DBError` → 500
-- `InternalError` → 500
-- `Unavailable` → 503
+| Variant | Status | Constructor |
+|---|---|---|
+| `BadRequest` | 400 | `bad_request(errors, message, description)` |
+| `Unauthorized` | 401 | Direct construction |
+| `Forbidden` | 403 | Direct construction |
+| `NotFound` | 404 | `not_found(resource)` |
+| `Conflict` | 409 | `conflict(message)` |
+| `UnprocessableEntity` | 422 | `unprocessable_entity(errors, message, description)` |
+| `DependencyFailed` | 424 | `dependency_failed(upstream, detail)` |
+| `InternalError` | 500 | `internal_error(error, message)` |
+| `Unavailable` | 503 | Direct construction |
+
+**Feature Flags:**
+
+- `verbose-errors` — When enabled, `InternalError` returns the raw error string to the client instead of a sanitized message. Intended for dev/staging only.
+
+```toml
+# In your Cargo.toml (dev/staging only)
+arche = { version = "2.2.0", features = ["verbose-errors"] }
+```
 
 ### Utils (`arche::utils`)
 

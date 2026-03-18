@@ -6,86 +6,65 @@ use std::collections::HashMap;
 
 #[derive(thiserror::Error, Debug)]
 pub enum AppError {
-    #[error("Authentication Required")]
-    Unauthorized,
-    #[error("Unprocessable Entity")]
-    UnprocessableEntity {
-        error_values: Option<HashMap<String, String>>,
-        message: Option<String>,
-        description: Option<String>,
-    },
-    #[error("Access Denied")]
-    _Forbidden,
-    #[error("DB Error")]
-    DBError {
-        error_values: Option<HashMap<String, String>>,
-        message: Option<String>,
-        description: Option<String>,
-    },
-    #[error("Internal Error")]
-    InternalError {
-        error: String,
-        message: Option<String>,
-    },
-    #[error("Service Unavailable")]
-    #[allow(dead_code)]
-    Unavailable,
+    // --- 4xx ---
     #[error("Bad Request")]
     BadRequest {
         error_values: Option<HashMap<String, String>>,
         message: Option<String>,
         description: Option<String>,
     },
-    #[error("Configuration Error")]
-    ConfigError {
-        field: String,
-        env_var: Option<String>,
-        reason: String,
+
+    #[error("Authentication Required")]
+    Unauthorized,
+
+    #[error("Access Denied")]
+    Forbidden,
+
+    #[error("Not Found")]
+    NotFound { resource: String },
+
+    #[error("Conflict")]
+    Conflict { message: String },
+
+    #[error("Unprocessable Entity")]
+    UnprocessableEntity {
+        error_values: Option<HashMap<String, String>>,
+        message: Option<String>,
+        description: Option<String>,
     },
+
+    #[error("Failed Dependency")]
+    DependencyFailed {
+        upstream: String,
+        detail: String,
+        retryable: bool,
+    },
+
+    // --- 5xx ---
+    #[error("Internal Error")]
+    InternalError {
+        error: String,
+        message: Option<String>,
+    },
+
+    #[error("Service Unavailable")]
+    #[allow(dead_code)]
+    Unavailable,
 }
 
 impl AppError {
-    // Mapper for ENUM to HTTP Status Code
     fn status_code(&self) -> StatusCode {
         match self {
+            Self::BadRequest { .. } => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::_Forbidden => StatusCode::FORBIDDEN,
+            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::NotFound { .. } => StatusCode::NOT_FOUND,
+            Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::UnprocessableEntity { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::DBError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::DependencyFailed { .. } => StatusCode::from_u16(424).unwrap(),
             Self::InternalError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::BadRequest { .. } => StatusCode::BAD_REQUEST,
-            Self::ConfigError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
-    }
-
-    // Helper for generating bad keys in the request
-    pub fn unprocessable_entity(
-        errors: Option<HashMap<String, String>>,
-        message: Option<String>,
-        description: Option<String>,
-    ) -> Self {
-        Self::UnprocessableEntity {
-            error_values: errors,
-            message,
-            description,
-        }
-    }
-
-    pub fn _db_error(
-        errors: Option<HashMap<String, String>>,
-        message: Option<String>,
-        description: Option<String>,
-    ) -> Self {
-        Self::DBError {
-            error_values: errors,
-            message,
-            description,
-        }
-    }
-
-    pub fn internal_error(error: String, message: Option<String>) -> Self {
-        Self::InternalError { error, message }
     }
 
     pub fn bad_request(
@@ -100,100 +79,158 @@ impl AppError {
         }
     }
 
-    pub fn config_error(field: String, env_var: Option<String>, reason: String) -> Self {
-        Self::ConfigError {
-            field,
-            env_var,
-            reason,
+    pub fn not_found(resource: impl Into<String>) -> Self {
+        Self::NotFound {
+            resource: resource.into(),
         }
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::Conflict {
+            message: message.into(),
+        }
+    }
+
+    pub fn unprocessable_entity(
+        errors: Option<HashMap<String, String>>,
+        message: Option<String>,
+        description: Option<String>,
+    ) -> Self {
+        Self::UnprocessableEntity {
+            error_values: errors,
+            message,
+            description,
+        }
+    }
+
+    pub fn dependency_failed(upstream: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::DependencyFailed {
+            upstream: upstream.into(),
+            detail: detail.into(),
+            retryable: true,
+        }
+    }
+
+    pub fn dependency_failed_permanent(
+        upstream: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::DependencyFailed {
+            upstream: upstream.into(),
+            detail: detail.into(),
+            retryable: false,
+        }
+    }
+
+    pub fn internal_error(error: String, message: Option<String>) -> Self {
+        Self::InternalError { error, message }
+    }
+
+    pub fn is_dependency_error(&self) -> bool {
+        matches!(self, Self::DependencyFailed { .. })
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
-            Self::UnprocessableEntity {
-                error_values,
-                message,
-                description,
-            } => {
-                return (
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(ErrorDetails {
-                        error_values,
-                        message,
-                        description,
-                    }),
-                )
-                    .into_response();
-            }
-            Self::Unauthorized => {
-                return (
-                    self.status_code(),
-                    [(WWW_AUTHENTICATE, "Token")],
-                    self.to_string(),
-                )
-                    .into_response();
-            }
-            Self::DBError {
-                error_values,
-                message,
-                description,
-            } => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorDetails {
-                        error_values,
-                        message,
-                        description,
-                    }),
-                )
-                    .into_response();
-            }
-            Self::InternalError { error, message } => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(InternalErrorDetails { error, message }),
-                )
-                    .into_response();
-            }
-            Self::Unavailable => {
-                return (StatusCode::SERVICE_UNAVAILABLE, self.to_string()).into_response();
-            }
             Self::BadRequest {
                 error_values,
                 message,
                 description,
-            } => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorDetails {
-                        error_values,
-                        message,
-                        description,
-                    }),
-                )
-                    .into_response();
-            }
-            Self::ConfigError {
-                field,
-                env_var,
-                reason,
-            } => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ConfigErrorDetails {
-                        field,
-                        env_var,
-                        reason,
-                    }),
-                )
-                    .into_response();
-            }
-            _ => (),
-        }
+            } => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorDetails {
+                    error_values,
+                    message,
+                    description,
+                }),
+            )
+                .into_response(),
 
-        (self.status_code(), self.to_string()).into_response()
+            Self::Unauthorized => (
+                self.status_code(),
+                [(WWW_AUTHENTICATE, "Token")],
+                self.to_string(),
+            )
+                .into_response(),
+
+            Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()).into_response(),
+
+            Self::NotFound { resource } => (
+                StatusCode::NOT_FOUND,
+                Json(NotFoundDetails {
+                    error: "not_found".to_string(),
+                    resource,
+                }),
+            )
+                .into_response(),
+
+            Self::Conflict { message } => (
+                StatusCode::CONFLICT,
+                Json(ConflictDetails {
+                    error: "conflict".to_string(),
+                    message,
+                }),
+            )
+                .into_response(),
+
+            Self::UnprocessableEntity {
+                error_values,
+                message,
+                description,
+            } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorDetails {
+                    error_values,
+                    message,
+                    description,
+                }),
+            )
+                .into_response(),
+
+            Self::DependencyFailed {
+                upstream,
+                detail,
+                retryable,
+            } => {
+                tracing::warn!(
+                    upstream = %upstream,
+                    detail = %detail,
+                    retryable,
+                    "returning 424: dependency failed"
+                );
+                (
+                    StatusCode::from_u16(424).unwrap(),
+                    Json(DependencyFailedDetails {
+                        error: "dependency_failed".to_string(),
+                        upstream,
+                        message: "An upstream dependency is currently unavailable".to_string(),
+                        retryable,
+                    }),
+                )
+                    .into_response()
+            }
+
+            Self::InternalError { error, message } => {
+                tracing::error!(internal_error = %error, message = ?message, "returning 500");
+
+                #[cfg(feature = "verbose-errors")]
+                let body = InternalErrorDetails { error, message };
+
+                #[cfg(not(feature = "verbose-errors"))]
+                let body = InternalErrorDetails {
+                    error: "internal_error".to_string(),
+                    message: Some("An unexpected error occurred".to_string()),
+                };
+
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+            }
+
+            Self::Unavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string()).into_response()
+            }
+        }
     }
 }
 
@@ -205,14 +242,27 @@ struct ErrorDetails {
 }
 
 #[derive(serde::Serialize)]
-struct InternalErrorDetails {
+struct NotFoundDetails {
     error: String,
-    message: Option<String>,
+    resource: String,
 }
 
 #[derive(serde::Serialize)]
-struct ConfigErrorDetails {
-    field: String,
-    env_var: Option<String>,
-    reason: String,
+struct ConflictDetails {
+    error: String,
+    message: String,
+}
+
+#[derive(serde::Serialize)]
+struct DependencyFailedDetails {
+    error: String,
+    upstream: String,
+    message: String,
+    retryable: bool,
+}
+
+#[derive(serde::Serialize)]
+struct InternalErrorDetails {
+    error: String,
+    message: Option<String>,
 }

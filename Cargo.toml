@@ -18,6 +18,10 @@ categories = [
 readme = "README.md"
 exclude = [".gitignore", ".vscode/*"]
 
+[features]
+default = []
+verbose-errors = []
+
 [dependencies]
 aws-config = "1.8.12"
 aws-sdk-s3 = "1.117.0"

@@ -32,10 +32,12 @@ pub async fn get_drive_client(
                 service = "google_drive",
                 "Failed to read service account key"
             );
-            AppError::config_error(
-                "service_account_key".to_string(),
-                Some("GCP_DRIVE_KEY".to_string()),
-                format!("Failed to read GCP key: {}", e),
+            AppError::internal_error(
+                format!(
+                    "Config error [service_account_key/GCP_DRIVE_KEY]: Failed to read GCP key: {}",
+                    e
+                ),
+                None,
             )
         })?;
 
@@ -48,10 +50,9 @@ pub async fn get_drive_client(
                 service = "google_drive",
                 "Failed to build authenticator"
             );
-            AppError::config_error(
-                "authenticator".to_string(),
+            AppError::internal_error(
+                format!("Failed to build GCP Drive authenticator: {}", e),
                 None,
-                format!("Failed to build GCP auth: {}", e),
             )
         })?;
 
@@ -63,10 +64,9 @@ pub async fn get_drive_client(
                 service = "google_drive",
                 "Failed to build HTTPS connector"
             );
-            AppError::config_error(
-                "https_connector".to_string(),
+            AppError::internal_error(
+                format!("Failed to build HTTPS connector for GCP Drive: {}", e),
                 None,
-                format!("Failed to build HTTPS connector: {}", e),
             )
         })?
         .https_or_http()
