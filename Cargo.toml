@@ -73,3 +73,4 @@ percent-encoding = "2.3"
 
 [dev-dependencies]
 cargo-husky = { version = "1", features = ["user-hooks"] }
+wiremock = "0.6"

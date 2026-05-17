@@ -32,7 +32,7 @@ Add arche to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-arche = "4.1.0"
+arche = "4.5.1"
 ```
 
 ## Modules
@@ -40,7 +40,7 @@ arche = "4.1.0"
 | Module | What it does |
 |---|---|
 | [`aws`](#aws) | S3, SES, KMS, and CloudFront via official AWS SDKs |
-| [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude); wrappers for Sheets, Drive, Cloud KMS, Cloud Storage, and Cloud CDN |
+| [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude); wrappers for Sheets, Drive, Cloud KMS, Cloud Storage, Cloud CDN, and Google OAuth login |
 | [`llm`](#llm) | Canonical LLM types + `LlmProvider` trait — backend-agnostic |
 | [`agent`](#agent) | Tool-calling agent engine, session state, SSE streaming |
 | [`database`](#database) | Postgres and Redis connection pooling with health checks |
@@ -445,6 +445,54 @@ assert_eq!(status.status, "DONE");
 
 **Scope:** global URL maps only — regional URL maps
 (`/regions/{region}/urlMaps/...`) are not supported and will return 404.
+
+#### Google OAuth (Sign in with Google)
+
+Server-side OAuth 2.0 + OpenID Connect: build the authorize URL, exchange the
+returned code for tokens, verify the issued ID token. JWKS are cached in-memory
+and key rotation is handled transparently — every algorithm other than RS256
+is rejected.
+
+```rust
+use arche::gcp::oauth::{get_oauth_client, GcpOAuthConfig, Verifier, build_auth_url, exchange_code};
+
+// All three fields fall back to GCP_OAUTH_CLIENT_ID / _CLIENT_SECRET / _REDIRECT_URI.
+let oauth = get_oauth_client(
+    GcpOAuthConfig::builder()
+        .client_id("123.apps.googleusercontent.com")
+        .client_secret("secret")
+        .redirect_uri("https://app.example/auth/google/callback")
+        .build(),
+)?;
+
+// 1. Redirect the user to Google's consent screen.
+let url = build_auth_url(&oauth, &state, &pkce_challenge);
+
+// 2. On callback, trade `code` for tokens.
+let tokens = exchange_code(&oauth, &code, &pkce_verifier).await?;
+
+// 3. Verify the ID token. `audiences` is the allow-list — your client_id(s).
+let verifier = Verifier::new()?;
+let claims = verifier
+    .verify_id_token(&tokens.id_token, &["123.apps.googleusercontent.com"])
+    .await?;
+println!("verified sub={}", claims.sub);
+```
+
+| Env Var | Description |
+|---|---|
+| `GCP_OAUTH_CLIENT_ID` | OAuth 2.0 client ID |
+| `GCP_OAUTH_CLIENT_SECRET` | OAuth 2.0 client secret |
+| `GCP_OAUTH_REDIRECT_URI` | Registered redirect URI |
+
+`Verifier` is cheap to construct and `Clone` — typically held once on
+`AppState`. Verification failures (bad signature, wrong audience, expired,
+unknown `kid` after a forced refresh) all surface as `AppError::Unauthorized`.
+JWKS / token-endpoint outages surface as
+`AppError::DependencyFailed { upstream: "gcp-oauth", … }`.
+
+See [`docs/gcp/oauth.md`](docs/gcp/oauth.md) for the end-to-end flow diagram
+and the Google Cloud Console setup steps.
 
 #### Any other GCP REST API
 
@@ -984,7 +1032,7 @@ async fn handler() -> Result<impl axum::response::IntoResponse, AppError> {
 details. Enable `verbose-errors` to expose raw error details (dev/staging only):
 
 ```toml
-arche = { version = "2.5.0", features = ["verbose-errors"] }
+arche = { version = "4.5.1", features = ["verbose-errors"] }
 ```
 
 ---

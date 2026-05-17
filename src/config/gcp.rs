@@ -149,6 +149,51 @@ impl GcpCdnConfigBuilder {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GcpOAuthConfig {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub redirect_uri: Option<String>,
+}
+
+impl GcpOAuthConfig {
+    pub fn builder() -> GcpOAuthConfigBuilder {
+        GcpOAuthConfigBuilder::default()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GcpOAuthConfigBuilder {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    redirect_uri: Option<String>,
+}
+
+impl GcpOAuthConfigBuilder {
+    pub fn client_id(mut self, v: impl Into<String>) -> Self {
+        self.client_id = Some(v.into());
+        self
+    }
+
+    pub fn client_secret(mut self, v: impl Into<String>) -> Self {
+        self.client_secret = Some(v.into());
+        self
+    }
+
+    pub fn redirect_uri(mut self, v: impl Into<String>) -> Self {
+        self.redirect_uri = Some(v.into());
+        self
+    }
+
+    pub fn build(self) -> GcpOAuthConfig {
+        GcpOAuthConfig {
+            client_id: self.client_id,
+            client_secret: self.client_secret,
+            redirect_uri: self.redirect_uri,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +266,28 @@ mod tests {
         assert!(config.project_id.is_none());
         assert!(config.url_map.is_none());
         assert!(config.compute_base_url.is_none());
+    }
+
+    #[test]
+    fn oauth_config_builder_collects_fields() {
+        let config = GcpOAuthConfig::builder()
+            .client_id("cid")
+            .client_secret("secret")
+            .redirect_uri("https://app.example/cb")
+            .build();
+        assert_eq!(config.client_id.as_deref(), Some("cid"));
+        assert_eq!(config.client_secret.as_deref(), Some("secret"));
+        assert_eq!(
+            config.redirect_uri.as_deref(),
+            Some("https://app.example/cb")
+        );
+    }
+
+    #[test]
+    fn oauth_config_default_is_all_none() {
+        let config = GcpOAuthConfig::default();
+        assert!(config.client_id.is_none());
+        assert!(config.client_secret.is_none());
+        assert!(config.redirect_uri.is_none());
     }
 }
