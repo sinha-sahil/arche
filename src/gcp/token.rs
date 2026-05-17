@@ -1,9 +1,15 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use rsa::RsaPrivateKey;
+use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::pkcs1v15::SigningKey;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::signature::{SignatureEncoding, Signer};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use tokio::sync::Mutex;
 
 use crate::error::AppError;
@@ -23,6 +29,10 @@ pub struct ServiceAccountKey {
     private_key_id: Option<String>,
     #[serde(default)]
     token_uri: Option<String>,
+    // PEM parsing is ~hundreds of microseconds; cached so signed-URL hot paths
+    // pay it once. Arc so the cache is shared across clones.
+    #[serde(skip, default)]
+    parsed_key: Arc<OnceLock<Arc<RsaPrivateKey>>>,
 }
 
 impl std::fmt::Debug for ServiceAccountKey {
@@ -43,6 +53,7 @@ impl ServiceAccountKey {
             private_key: normalize_private_key(&private_key.into()),
             private_key_id: None,
             token_uri: None,
+            parsed_key: Arc::new(OnceLock::new()),
         }
     }
 
@@ -67,6 +78,48 @@ impl ServiceAccountKey {
     fn token_uri(&self) -> &str {
         self.token_uri.as_deref().unwrap_or(DEFAULT_TOKEN_URI)
     }
+
+    pub(crate) fn client_email(&self) -> &str {
+        &self.client_email
+    }
+
+    pub(crate) fn sign_rs256_sha256(&self, data: &[u8]) -> Result<Vec<u8>, AppError> {
+        let private_key = self.parsed_rsa_private_key()?;
+        let signing_key: SigningKey<Sha256> = SigningKey::new((*private_key).clone());
+        let signature = signing_key
+            .try_sign(data)
+            .map_err(|e| AppError::internal_error(format!("RS256 signing failed: {e}"), None))?;
+        Ok(signature.to_bytes().to_vec())
+    }
+
+    fn parsed_rsa_private_key(&self) -> Result<Arc<RsaPrivateKey>, AppError> {
+        if let Some(k) = self.parsed_key.get() {
+            return Ok(k.clone());
+        }
+        let parsed = parse_rsa_pem(&self.private_key)?;
+        // If another thread won the race, set() is a no-op and get() below
+        // returns the value they stored.
+        let _ = self.parsed_key.set(Arc::new(parsed));
+        Ok(self
+            .parsed_key
+            .get()
+            .expect("parsed_key initialised above")
+            .clone())
+    }
+}
+
+// Real GCP service-account keys are PKCS#8; PKCS#1 is here for hand-rolled
+// keys passed to `ServiceAccountKey::new()`.
+fn parse_rsa_pem(pem: &str) -> Result<RsaPrivateKey, AppError> {
+    if let Ok(k) = RsaPrivateKey::from_pkcs8_pem(pem) {
+        return Ok(k);
+    }
+    RsaPrivateKey::from_pkcs1_pem(pem).map_err(|e| {
+        AppError::internal_error(
+            format!("Invalid GCP service account private key (tried PKCS#8 and PKCS#1): {e}"),
+            None,
+        )
+    })
 }
 
 // `.env` stores newlines as `\\n`; PEM parsers need real newlines.
@@ -119,6 +172,14 @@ impl TokenSource {
             cache: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn signer_email(&self) -> &str {
+        self.key.client_email()
+    }
+
+    pub(crate) fn sign_blob(&self, data: &[u8]) -> Result<Vec<u8>, AppError> {
+        self.key.sign_rs256_sha256(data)
     }
 
     pub async fn access_token(&self, scopes: &[&str]) -> Result<String, AppError> {
@@ -180,12 +241,12 @@ impl TokenSource {
             }
         }
 
-        Err(AppError::internal_error(
+        Err(AppError::dependency_failed(
+            "gcp-oauth2",
             format!(
-                "Failed to fetch GCP access token after {TOKEN_FETCH_MAX_ATTEMPTS} attempts: {}",
+                "failed to fetch access token after {TOKEN_FETCH_MAX_ATTEMPTS} attempts: {}",
                 last_transient.unwrap_or_else(|| "unknown error".into())
             ),
-            None,
         ))
     }
 
@@ -254,19 +315,21 @@ impl TokenSource {
         }
 
         if !status.is_success() {
-            return Err(TokenFetchError::Permanent(AppError::internal_error(
-                format!(
-                    "GCP token endpoint returned {status}: {}",
-                    parse_token_error(&body)
+            return Err(TokenFetchError::Permanent(
+                AppError::dependency_failed_permanent(
+                    "gcp-oauth2",
+                    format!(
+                        "token endpoint returned {status}: {}",
+                        parse_token_error(&body)
+                    ),
                 ),
-                None,
-            )));
+            ));
         }
 
         let token: TokenResponse = serde_json::from_slice(&body).map_err(|e| {
-            TokenFetchError::Permanent(AppError::internal_error(
-                format!("Malformed GCP token response: {e}"),
-                None,
+            TokenFetchError::Permanent(AppError::dependency_failed_permanent(
+                "gcp-oauth2",
+                format!("malformed token response: {e}"),
             ))
         })?;
 

@@ -40,7 +40,7 @@ arche = "4.1.0"
 | Module | What it does |
 |---|---|
 | [`aws`](#aws) | S3, SES, KMS, and CloudFront via official AWS SDKs |
-| [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude); wrappers for Sheets, Drive, and Cloud KMS |
+| [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude); wrappers for Sheets, Drive, Cloud KMS, Cloud Storage, and Cloud CDN |
 | [`llm`](#llm) | Canonical LLM types + `LlmProvider` trait — backend-agnostic |
 | [`agent`](#agent) | Tool-calling agent engine, session state, SSE streaming |
 | [`database`](#database) | Postgres and Redis connection pooling with health checks |
@@ -314,6 +314,102 @@ let kms = arche::gcp::kms::GcpKmsClient::new(
     None,
 );
 ```
+
+#### Cloud Storage (GCS)
+
+Object upload / download / delete / list / head, plus V4-signed GET URLs.
+Bucket is per-call so one client can target many buckets. Uploads and
+downloads buffer the full object in memory — keep this in mind for large
+files.
+
+```rust
+use arche::gcp::gcs::{get_gcs_client, GcsConfig};
+use std::collections::HashMap;
+use std::time::Duration;
+
+// All fields optional — gcs_base_url and signed-URL expiry default fine.
+let gcs = get_gcs_client(Some(key), None, None).await?;
+
+// Upload with optional user metadata (e.g. `modified_by`)
+let mut meta = HashMap::new();
+meta.insert("modified_by".into(), "alice".into());
+let object = gcs.upload(
+    "my-bucket",
+    "reports/q4.pdf",
+    pdf_bytes,
+    "application/pdf",
+    meta,
+).await?;
+// object.generation: Option<i64>  — round-trippable into download/head/delete
+
+// Read it back
+let bytes = gcs.download("my-bucket", "reports/q4.pdf", None).await?;
+
+// Or a specific historical version (requires Object Versioning on the bucket)
+let old = gcs.download("my-bucket", "reports/q4.pdf", Some(1_700_000_123_456_789)).await?;
+
+// Metadata-only fetch
+let meta = gcs.head("my-bucket", "reports/q4.pdf", None).await?;
+
+// Merge-patch user metadata (existing keys overwritten, others untouched)
+let mut update = HashMap::new();
+update.insert("reviewed_by".into(), "bob".into());
+gcs.patch_metadata("my-bucket", "reports/q4.pdf", update).await?;
+
+// List a prefix; pass `versions: true` to include non-current generations
+let page = gcs.list("my-bucket", Some("reports/"), None, false).await?;
+
+// V4-signed GET URL (defaults to client's expiry, max 7 days). Always
+// points at `storage.googleapis.com` regardless of GCS_BASE_URL.
+let url = gcs.signed_get_url("my-bucket", "reports/q4.pdf", Some(Duration::from_secs(600)))?;
+```
+
+| Env Var | Description |
+|---|---|
+| `GCS_BASE_URL` | Override the storage endpoint (testing / VPC-SC; ignored for signed URLs) |
+| `GCS_SIGNED_URL_EXPIRY_SECS` | Default expiry for `signed_get_url` (default: 900, max: 604800) |
+
+`upload` switches automatically to multipart when called — user metadata
+travels with the bytes in one request, no separate PATCH needed. Object names
+containing `/` are URL-encoded for the JSON-API path but left literal in
+V4-signed paths, matching GCS spec.
+
+#### Cloud CDN
+
+Cache invalidation against a global URL map, plus operation polling.
+
+```rust
+use arche::gcp::cdn::{get_cdn_client, GcpCdnConfig};
+
+let cdn = get_cdn_client(
+    Some(key),
+    None,
+    GcpCdnConfig::builder()
+        .project_id("my-project")
+        .url_map("my-lb-url-map") // optional default; pass per-call to override
+        .build(),
+).await?;
+
+// Invalidate. `path` must start with `/` and may use `*` as a suffix wildcard.
+// `host` scopes the invalidation to a hostname routed by the URL map.
+let op = cdn.invalidate(None, "/static/*", Some("cdn.example.com")).await?;
+// op.name — the operation name; pass it to `invalidation_status` to poll
+// op.status — "PENDING" / "RUNNING" / "DONE"
+// op.progress — Option<i32>, 0..=100
+
+// Poll until done
+let status = cdn.invalidation_status(&op.name).await?;
+assert_eq!(status.status, "DONE");
+```
+
+| Env Var | Description |
+|---|---|
+| `GCP_CDN_PROJECT_ID` | GCP project hosting the URL map (required) |
+| `GCP_CDN_URL_MAP` | Optional default URL map name |
+| `GCP_CDN_BASE_URL` | Override the Compute API endpoint |
+
+**Scope:** global URL maps only — regional URL maps
+(`/regions/{region}/urlMaps/...`) are not supported and will return 404.
 
 #### Any other GCP REST API
 

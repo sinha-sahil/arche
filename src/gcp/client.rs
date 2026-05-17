@@ -71,6 +71,14 @@ impl GcpClient {
         &self.http
     }
 
+    pub(crate) fn signer_email(&self) -> &str {
+        self.token.signer_email()
+    }
+
+    pub(crate) fn sign_blob(&self, data: &[u8]) -> Result<Vec<u8>, AppError> {
+        self.token.sign_blob(data)
+    }
+
     pub async fn access_token(&self) -> Result<String, AppError> {
         let scopes: Vec<&str> = self.scopes.iter().map(String::as_str).collect();
         self.token.access_token(&scopes).await
