@@ -1,5 +1,5 @@
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use crate::config::{resolve_optional_string, resolve_required, resolve_required_string};
 use crate::error::AppError;
@@ -72,14 +72,16 @@ pub async fn get_pg_pool(config: impl Into<Option<PgConfig>>) -> Result<PgPool, 
     let database = resolve_required_string(config.database, "PG_DATABASE", "database")?;
     let max_conn: u32 = resolve_required(config.max_connections, "PG_MAX_CONN", "max_connections")?;
 
-    let pg_url = format!(
-        "postgres://{}:{}@{}:{}/{}",
-        credentials.username, credentials.password, host, port, database
-    );
+    let connect_options = PgConnectOptions::new()
+        .host(&host)
+        .port(port)
+        .database(&database)
+        .username(&credentials.username)
+        .password(&credentials.password);
 
     PgPoolOptions::new()
         .max_connections(max_conn)
-        .connect(&pg_url)
+        .connect_with(connect_options)
         .await
         .map_err(|e| AppError::internal_error(format!("Failed to create PG Pool: {}", e), None))
 }
