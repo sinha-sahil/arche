@@ -21,6 +21,7 @@ pub use axum;
 pub use base64;
 pub use bb8;
 pub use bb8_redis;
+pub use clickhouse as ch_client;
 pub use csv_async;
 pub use dotenv;
 pub use futures;

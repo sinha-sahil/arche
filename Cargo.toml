@@ -28,6 +28,8 @@ aws-sdk-s3 = "1.117.0"
 serde = { version = "1.0.228", features = ["derive"] }
 bb8-redis = "0.26.0"
 bb8 = "0.9.1"
+clickhouse = { version = "0.13", features = ["lz4", "time", "uuid"] }
+regex = "1"
 dotenv = "0.15.0"
 sqlx = { version = "0.8.6", features = [
     "runtime-tokio-native-tls",

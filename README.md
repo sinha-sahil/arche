@@ -43,7 +43,7 @@ arche = "4.5.1"
 | [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude); wrappers for Sheets, Drive, Cloud KMS, Cloud Storage, Cloud CDN, and Google OAuth login |
 | [`llm`](#llm) | Canonical LLM types + `LlmProvider` trait — backend-agnostic |
 | [`agent`](#agent) | Tool-calling agent engine, session state, SSE streaming |
-| [`database`](#database) | Postgres and Redis connection pooling with health checks |
+| [`database`](#database) | Postgres, Redis, and ClickHouse connection pooling with health checks |
 | [`jwt`](#jwt) | HS256 token generation, verification, and expiry helpers |
 | [`csv`](#csv) | Async CSV read/write — batch, streaming, and from URL |
 | [`json`](#json) | Streaming JSON array parsing with metadata extraction |
@@ -802,6 +802,54 @@ let is_healthy = test_redis(pool.clone()).await?;
 | `REDIS_MAX_CONN` | Maximum pool connections |
 | `REDIS_PASSWORD` | Optional password |
 
+#### ClickHouse
+
+Read-only connection pooling with `bb8` (round-robin across replicas) and a
+typed row API. SQL templates are `&'static str` — a compile-time check that
+prevents user input from being concatenated into a query.
+
+```rust
+use arche::database::clickhouse::{
+    get_clickhouse_pool, ClickHousePoolExt, Row, Deserialize,
+};
+
+let pool = get_clickhouse_pool(None).await?;
+let conn = pool.get_conn().await?;
+
+#[derive(Row, Deserialize)]
+struct EventCount { event: String, n: u64 }
+
+let counts: Vec<EventCount> = conn
+    .query("SELECT event, count() AS n FROM events WHERE day = ? GROUP BY event")
+    .bind("2026-05-25")
+    .fetch_all().await?;
+```
+
+Notes:
+- Bare `SELECT *` / `SELECT t.*` are blocked. Call `.allow_select_star()`
+  on a query, set `.allow_select_star(true)` on the config, or set
+  `CLICKHOUSE_ALLOW_SELECT_STAR=true` to bypass.
+- For runtime-constructed SQL use `conn.query_dynamic(string)` /
+  `conn.execute_dynamic(string)` — these accept `String` and shift
+  injection-safety responsibility to the caller.
+- Writes go through Kafka → Kafka Connect ClickHouse Sink, not this
+  connector.
+
+| Env Var | Description | Default |
+|---|---|---|
+| `CLICKHOUSE_HOSTS` | Comma-separated replica hostnames | — (required) |
+| `CLICKHOUSE_HOST` | Single-host fallback if `CLICKHOUSE_HOSTS` is unset | — |
+| `CLICKHOUSE_PORT` | Server port | 8443 (secure) / 8123 (plain) |
+| `CLICKHOUSE_DATABASE` | Default database | `default` |
+| `CLICKHOUSE_USERNAME` | Username | `default` |
+| `CLICKHOUSE_PASSWORD` | Password | (empty) |
+| `CLICKHOUSE_SECURE` | HTTPS toggle | `true` |
+| `CLICKHOUSE_MAX_POOL_SIZE` | Max pool connections | `32` |
+| `CLICKHOUSE_CONNECTION_TIMEOUT_MS` | Pool-acquire timeout | `5000` |
+| `CLICKHOUSE_REQUEST_TIMEOUT_MS` | Per-request `max_execution_time` | `30000` |
+| `CLICKHOUSE_COMPRESSION` | `lz4` or `none` | `none` |
+| `CLICKHOUSE_ALLOW_SELECT_STAR` | Global `SELECT *` escape hatch | `false` |
+
 ---
 
 ### JWT
@@ -1061,7 +1109,7 @@ let params = PaginationParams { page_number: Some(1), page_size: Some(20) };
 
 arche re-exports these crates so you don't need to add them separately:
 
-`axum` · `tokio` · `serde` · `serde_json` · `sqlx` · `time` · `tracing` · `tracing-subscriber` · `reqwest` · `jsonwebtoken` · `nanoid` · `thiserror` · `base64` · `bb8` · `bb8-redis` · `csv-async` · `futures` · `tokio-stream` · `dotenv` · `aws-config` · `aws-sdk-s3` · `aws-sdk-sesv2` · `aws-sdk-kms` · `aws-sdk-cloudfront`
+`axum` · `tokio` · `serde` · `serde_json` · `sqlx` · `time` · `tracing` · `tracing-subscriber` · `reqwest` · `jsonwebtoken` · `nanoid` · `thiserror` · `base64` · `bb8` · `bb8-redis` · `clickhouse` (as `ch_client`) · `csv-async` · `futures` · `tokio-stream` · `dotenv` · `aws-config` · `aws-sdk-s3` · `aws-sdk-sesv2` · `aws-sdk-kms` · `aws-sdk-cloudfront`
 
 ---
 

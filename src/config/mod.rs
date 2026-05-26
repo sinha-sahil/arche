@@ -1,6 +1,7 @@
 mod resolve;
 
 pub(crate) mod aws;
+pub(crate) mod clickhouse;
 pub(crate) mod cloudfront;
 pub(crate) mod gcp;
 pub(crate) mod pg;
