@@ -183,6 +183,11 @@ impl GcsClient {
 
     /// Upload `bytes` to `bucket/object`. Optional `metadata` becomes user-defined
     /// metadata on the object (the GCS `metadata` field).
+    ///
+    /// Pass `Some(generation)` as `if_generation_match` to make the write
+    /// conditional on the object's current generation (compare-and-swap);
+    /// `Some(0)` means "only if the object does not exist". On mismatch GCS
+    /// returns HTTP 412, surfaced as a dependency error containing `412`.
     pub async fn upload(
         &self,
         bucket: &str,
@@ -190,13 +195,10 @@ impl GcsClient {
         bytes: Vec<u8>,
         content_type: &str,
         metadata: impl Into<Option<HashMap<String, String>>>,
+        if_generation_match: impl Into<Option<i64>>,
     ) -> Result<ObjectMetadata, AppError> {
         let metadata = metadata.into();
-        let url = format!(
-            "{}/upload/storage/v1/b/{}/o?uploadType=multipart",
-            self.base_url,
-            utf8_percent_encode(bucket, JSON_API_OBJECT),
-        );
+        let url = build_upload_url(&self.base_url, bucket, if_generation_match.into());
 
         let boundary = format!("arche-gcs-{}", nanoid::nanoid!());
         let body = build_multipart_body(object, &bytes, content_type, metadata.as_ref(), &boundary);
@@ -501,6 +503,18 @@ async fn handle_json<T: for<'de> Deserialize<'de>>(
     })
 }
 
+fn build_upload_url(base_url: &str, bucket: &str, if_generation_match: Option<i64>) -> String {
+    let mut url = format!(
+        "{}/upload/storage/v1/b/{}/o?uploadType=multipart",
+        base_url,
+        utf8_percent_encode(bucket, JSON_API_OBJECT),
+    );
+    if let Some(g) = if_generation_match {
+        url.push_str(&format!("&ifGenerationMatch={g}"));
+    }
+    url
+}
+
 fn build_multipart_body(
     object: &str,
     bytes: &[u8],
@@ -731,6 +745,30 @@ zX3MzefeYsmqNGe18oRDMVOCMMY55p8f9t48pXNUKpcm5eFKMKGeWxHPR05r+guL
             .signed_get_url_at("bkt", "obj", Some(Duration::from_secs(900)), now)
             .unwrap();
         assert_eq!(url_a, url_b, "RSA-PKCS1v15 should be deterministic");
+    }
+
+    #[test]
+    fn build_upload_url_without_precondition_has_no_generation_param() {
+        let url = build_upload_url("https://storage.googleapis.com", "my-bucket", None);
+        assert_eq!(
+            url,
+            "https://storage.googleapis.com/upload/storage/v1/b/my-bucket/o?uploadType=multipart"
+        );
+    }
+
+    #[test]
+    fn build_upload_url_with_generation_appends_precondition() {
+        let url = build_upload_url("https://storage.googleapis.com", "my-bucket", Some(1234));
+        assert_eq!(
+            url,
+            "https://storage.googleapis.com/upload/storage/v1/b/my-bucket/o?uploadType=multipart&ifGenerationMatch=1234"
+        );
+    }
+
+    #[test]
+    fn build_upload_url_with_zero_generation_means_create_only() {
+        let url = build_upload_url("https://storage.googleapis.com", "my-bucket", Some(0));
+        assert!(url.ends_with("&ifGenerationMatch=0"));
     }
 
     #[test]
