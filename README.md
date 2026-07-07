@@ -446,53 +446,58 @@ assert_eq!(status.status, "DONE");
 **Scope:** global URL maps only — regional URL maps
 (`/regions/{region}/urlMaps/...`) are not supported and will return 404.
 
-#### Google OAuth (Sign in with Google)
+#### OIDC login (Sign in with Google, or any OIDC provider)
 
-Server-side OAuth 2.0 + OpenID Connect: build the authorize URL, exchange the
-returned code for tokens, verify the issued ID token. JWKS are cached in-memory
-and key rotation is handled transparently — every algorithm other than RS256
-is rejected.
+Server-side OAuth 2.0 + OpenID Connect in `arche::oidc`: build the authorize
+URL, exchange the returned code for tokens, verify the issued ID token. JWKS
+are cached in-memory and key rotation is handled transparently — every
+algorithm other than RS256 is rejected.
+
+Provider endpoints come from a `ProviderMetadata`: use the shipped `google()`
+preset, construct one statically, or fetch it via OIDC discovery.
 
 ```rust
-use arche::gcp::oauth::{get_oauth_client, GcpOAuthConfig, Verifier, build_auth_url, exchange_code};
+use arche::gcp::oauth::google;
+use arche::oidc::{OidcClient, OidcConfig, ProviderMetadata, Verifier};
 
-// All three fields fall back to GCP_OAUTH_CLIENT_ID / _CLIENT_SECRET / _REDIRECT_URI.
-let oauth = get_oauth_client(
-    GcpOAuthConfig::builder()
-        .client_id("123.apps.googleusercontent.com")
-        .client_secret("secret")
-        .redirect_uri("https://app.example/auth/google/callback")
-        .build(),
+let client = OidcClient::new(
+    google(),
+    OidcConfig {
+        client_id: "123.apps.googleusercontent.com".into(),
+        client_secret: "secret".into(),
+        redirect_uri: "https://app.example/auth/google/callback".into(),
+        scopes: None, // defaults to "openid email profile"
+    },
 )?;
 
-// 1. Redirect the user to Google's consent screen.
-let url = build_auth_url(&oauth, &state, &pkce_challenge);
+// Or any other provider via discovery (fetches /.well-known/openid-configuration).
+let acme = ProviderMetadata::discover_default("acme", "https://id.acme.example").await?;
+
+// 1. Redirect the user to the provider's consent screen.
+let url = client.auth_url(&state, &pkce_challenge);
 
 // 2. On callback, trade `code` for tokens.
-let tokens = exchange_code(&oauth, &code, &pkce_verifier).await?;
+let tokens = client.exchange_code(&code, &pkce_verifier).await?;
 
-// 3. Verify the ID token. `audiences` is the allow-list — your client_id(s).
-let verifier = Verifier::new()?;
-let claims = verifier
+// 3. Verify the ID token into your own claims type. `audiences` is the
+//    allow-list — your client_id(s). Pass `serde_json::Value` for untyped access.
+#[derive(serde::Deserialize)]
+struct Claims { sub: String, email: String, email_verified: bool }
+
+let verifier = Verifier::new(client.provider())?;
+let claims: Claims = verifier
     .verify_id_token(&tokens.id_token, &["123.apps.googleusercontent.com"])
     .await?;
 println!("verified sub={}", claims.sub);
 ```
 
-| Env Var | Description |
-|---|---|
-| `GCP_OAUTH_CLIENT_ID` | OAuth 2.0 client ID |
-| `GCP_OAUTH_CLIENT_SECRET` | OAuth 2.0 client secret |
-| `GCP_OAUTH_REDIRECT_URI` | Registered redirect URI |
-
 `Verifier` is cheap to construct and `Clone` — typically held once on
-`AppState`. Verification failures (bad signature, wrong audience, expired,
-unknown `kid` after a forced refresh) all surface as `AppError::Unauthorized`.
-JWKS / token-endpoint outages surface as
-`AppError::DependencyFailed { upstream: "gcp-oauth", … }`.
-
-See [`docs/gcp/oauth.md`](docs/gcp/oauth.md) for the end-to-end flow diagram
-and the Google Cloud Console setup steps.
+`AppState`. `exp`/`iat`/`iss`/`aud` are validated regardless of your claims
+type; a valid token that doesn't fit your type is an internal error, not a
+401. Verification failures (bad signature, wrong audience, expired, unknown
+`kid` after a forced refresh) surface as `AppError::Unauthorized`; JWKS /
+token-endpoint / discovery outages as
+`AppError::DependencyFailed { upstream: "oidc-{provider}", … }`.
 
 #### Any other GCP REST API
 
