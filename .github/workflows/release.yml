@@ -85,10 +85,12 @@ jobs:
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
+      - name: Install Rust toolchain (version pinned in rust-toolchain.toml)
+        run: |
+          TOOLCHAIN=$(grep -oE 'channel = "[^"]+"' rust-toolchain.toml | cut -d'"' -f2)
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --component clippy --component rustfmt
+          rustup default "$TOOLCHAIN"
+          rustc --version && cargo clippy --version
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2

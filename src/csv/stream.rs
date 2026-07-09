@@ -21,10 +21,7 @@ impl<R: AsyncRead + Unpin + Send> CsvRecordStream<R> {
                 Err(e) => return Some(Err(map_csv_error(e))),
             }
         }
-        let header_ref = self
-            .headers
-            .as_ref()
-            .and_then(|h| if h.is_empty() { None } else { Some(h) });
+        let header_ref = self.headers.as_ref().filter(|&h| !h.is_empty());
         let mut record = csv_async::StringRecord::new();
         match self.inner.read_record(&mut record).await {
             Ok(true) => Some(record.deserialize(header_ref).map_err(map_csv_error)),
