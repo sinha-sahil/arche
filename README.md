@@ -11,7 +11,7 @@
 Cloud integrations, databases, auth, LLM inference, tool-calling agents, encryption,
 streaming JSON/CSV, WebSockets, and structured error handling — wired up and ready to go.
 
-`arche` sits *around* Axum, not in place of it.
+`arche` sits _around_ Axum, not in place of it.
 
 [Getting Started](#getting-started) · [Modules](#modules) · [API Reference](#api-reference) · [Design Principles](#design-principles)
 
@@ -32,29 +32,31 @@ Add arche to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-arche = "4.7.0"
+arche = "4.10.0"
 ```
 
 ## Modules
 
-| Module | What it does |
-|---|---|
-| [`aws`](#aws) | S3, SES, KMS, and CloudFront via official AWS SDKs |
-| [`gcp`](#gcp) | Generic GCP REST client + **Vertex AI** (Gemini + Claude); wrappers for Sheets, Drive, Cloud KMS, Cloud Storage, Cloud CDN, and Google OAuth login |
-| [`llm`](#llm) | Canonical LLM types + `LlmProvider` trait — backend-agnostic |
-| [`agent`](#agent) | Tool-calling agent engine, session state, SSE streaming |
-| [`database`](#database) | Postgres, Redis, and ClickHouse connection pooling with health checks |
-| [`jwt`](#jwt) | HS256 token generation, verification, and expiry helpers |
-| [`csv`](#csv) | Async CSV read/write — batch, streaming, and from URL |
-| [`json`](#json) | Streaming JSON array parsing with metadata extraction |
-| [`crypto`](#crypto) | AES-128-CBC encryption with PBKDF2 key derivation |
-| [`sockets`](#sockets) | WebSocket connection registry with broadcast |
-| [`error`](#error) | Axum-compatible structured error responses (400–503) |
-| [`utils`](#utils) | Alphanumeric nano IDs, timestamp validation, date/time conversions, pagination |
+| Module                  | What it does                                                                                                                                       |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`aws`](#aws)           | S3, SES, KMS, and CloudFront via official AWS SDKs                                                                                                 |
+| [`gcp`](#gcp)           | Generic GCP REST client + **Vertex AI** (Gemini + Claude); wrappers for Sheets, Drive, Cloud KMS, Cloud Storage, Cloud CDN, and Google OAuth login |
+| [`oidc`](#oidc)         | OpenID Connect both ways — _"Sign in with Google"_ client + build-your-own identity provider (authorization-code + PKCE, RS256)                    |
+| [`llm`](#llm)           | Canonical LLM types + `LlmProvider` trait — backend-agnostic                                                                                       |
+| [`agent`](#agent)       | Tool-calling agent engine, session state, SSE streaming                                                                                            |
+| [`database`](#database) | Postgres, Redis, and ClickHouse connection pooling with health checks                                                                              |
+| [`jwt`](#jwt)           | HS256 token generation, verification, and expiry helpers                                                                                           |
+| [`csv`](#csv)           | Async CSV read/write — batch, streaming, and from URL                                                                                              |
+| [`json`](#json)         | Streaming JSON array parsing with metadata extraction                                                                                              |
+| [`crypto`](#crypto)     | AES-128-CBC encryption with PBKDF2 key derivation                                                                                                  |
+| [`sockets`](#sockets)   | WebSocket connection registry with broadcast                                                                                                       |
+| [`error`](#error)       | Axum-compatible structured error responses (400–503)                                                                                               |
+| [`utils`](#utils)       | Alphanumeric nano IDs, timestamp validation, date/time conversions, pagination                                                                     |
 
-Every service module exports a **config builder** so you can wire up credentials
-programmatically — or omit it entirely and let arche resolve everything from
-environment variables.
+> [!TIP]
+> Every service module exports a **config builder** to wire up credentials
+> programmatically — or omit it entirely (pass `None`) and let arche resolve
+> everything from environment variables.
 
 ```rust
 // Pass None to resolve entirely from env vars
@@ -95,12 +97,12 @@ let config = S3ConfigBuilder::default()
 let client = get_s3_client(config).await?;
 ```
 
-| Env Var | Description |
-|---|---|
-| `S3_CRED_SOURCE` | `"IAM"` (default) or `"env"` |
-| `S3_ACCESS_KEY_ID` | Required when source is `"env"` |
-| `S3_SECRET_ACCESS_KEY` | Required when source is `"env"` |
-| `S3_REGION` | AWS region (default: `ap-south-1`) |
+| Env Var                | Description                        |
+| ---------------------- | ---------------------------------- |
+| `S3_CRED_SOURCE`       | `"IAM"` (default) or `"env"`       |
+| `S3_ACCESS_KEY_ID`     | Required when source is `"env"`    |
+| `S3_SECRET_ACCESS_KEY` | Required when source is `"env"`    |
+| `S3_REGION`            | AWS region (default: `ap-south-1`) |
 
 #### KMS
 
@@ -118,8 +120,8 @@ let plaintext = kms.decrypt(&ciphertext).await?;
 let plaintext = kms.decrypt_base64("base64string...").await?;
 ```
 
-| Env Var | Description |
-|---|---|
+| Env Var      | Description                        |
+| ------------ | ---------------------------------- |
 | `AWS_REGION` | AWS region (default: `ap-south-1`) |
 
 #### SES
@@ -147,8 +149,8 @@ let message_id = ses.send_templated_email(
 ).await?;
 ```
 
-| Env Var | Description |
-|---|---|
+| Env Var      | Description                        |
+| ------------ | ---------------------------------- |
 | `AWS_REGION` | AWS region (default: `ap-south-1`) |
 
 #### CloudFront
@@ -175,6 +177,11 @@ println!("{} -> {}", result.id, result.status);
 Per CloudFront limits: paths must start with `/`, max 3000 paths per call,
 caller reference ≤ 128 chars.
 
+> [!NOTE]
+> `caller_reference: None` auto-generates a fresh nanoid on every call, so a
+> retried request creates a **duplicate** invalidation. Pass a stable value for
+> idempotent retries.
+
 **Get invalidation status** — fetch the current status of a previously created
 invalidation. Returns the same `InvalidationResult` shape; status transitions
 from `"InProgress"` to `"Completed"` (typically 5–15 minutes).
@@ -197,10 +204,10 @@ cf.invalidate_paths(None, vec!["/index.html".into()], None).await?;
 cf.get_invalidation(None, "I2J3K4L5...").await?;
 ```
 
-| Env Var | Description |
-|---|---|
-| `AWS_REGION` | AWS region (default: `ap-south-1`) |
-| `CLOUDFRONT_DISTRIBUTION_ID` | Optional default distribution ID |
+| Env Var                      | Description                        |
+| ---------------------------- | ---------------------------------- |
+| `AWS_REGION`                 | AWS region (default: `ap-south-1`) |
+| `CLOUDFRONT_DISTRIBUTION_ID` | Optional default distribution ID   |
 
 ---
 
@@ -249,19 +256,18 @@ let kms = arche::gcp::kms::get_kms_client(None, None, None).await?;
 Tokens are cached with a 60 s safety margin, single-flighted per scope set,
 and retried once on transient failures — uniformly across all three modes.
 
-**Caveats for the metadata-server path:**
-
-- **Scopes are ignored.** The metadata endpoint returns whatever scopes the
-  pod's bound service account has, regardless of what you pass to the
-  client. If you need narrower scopes, use an explicit `ServiceAccountKey`.
-- **`GCP_METADATA_URL` is read at construction time.** Changing the env var
-  after the client is built has no effect — set it before the first
-  `GcpClient::new(None, None, …)` call. Useful for pointing tests at a
-  mock HTTP server.
-- **Signed URLs are unsupported.** V4 signed URLs (`GcsClient::sign_*`)
-  require the SA's private key, which the metadata server never exposes.
-  Those calls return a clear error on this path — use an explicit
-  `ServiceAccountKey` for signed-URL workflows.
+> [!WARNING]
+> **Caveats for the metadata-server path:**
+>
+> - **Scopes are ignored** — the endpoint returns whatever scopes the pod's
+>   bound service account has. Need narrower scopes? Use an explicit
+>   `ServiceAccountKey`.
+> - **`GCP_METADATA_URL` is read once, at construction.** Changing it later has
+>   no effect — set it before the first `GcpClient::new(None, None, …)` call
+>   (handy for pointing tests at a mock).
+> - **Signed URLs are unsupported** — V4 signing (`GcsClient::sign_*`) needs the
+>   SA's private key, which the metadata server never exposes. Those calls
+>   return a clear error here.
 
 #### Sheets
 
@@ -277,8 +283,9 @@ let resp = sheets
     .await?;
 ```
 
-Pass either `Some(key)` or `Some(path)` — never both. Scope is preset to
-`https://www.googleapis.com/auth/spreadsheets`.
+> [!NOTE]
+> Pass either `Some(key)` or `Some(path)` — never both. Scope is preset to
+> `https://www.googleapis.com/auth/spreadsheets`.
 
 #### Drive
 
@@ -329,13 +336,13 @@ let plaintext = kms.decrypt(&kms_key, &out.ciphertext).await?;
 let plaintext = kms.decrypt_base64(&kms_key, &b64_string).await?;
 ```
 
-| Env Var | Description |
-|---|---|
-| `GCP_KMS_PROJECT_ID` | GCP project hosting the KMS key (required) |
-| `GCP_KMS_LOCATION` | KMS location (default: `global`) |
-| `GCP_KMS_BASE_URL` | Override the Cloud KMS endpoint (testing / VPC-SC) |
-| `GCP_KMS_KEY_RING` | Used by `GcpKmsKey::from_env()` |
-| `GCP_KMS_KEY_NAME` | Used by `GcpKmsKey::from_env()` |
+| Env Var              | Description                                        |
+| -------------------- | -------------------------------------------------- |
+| `GCP_KMS_PROJECT_ID` | GCP project hosting the KMS key (required)         |
+| `GCP_KMS_LOCATION`   | KMS location (default: `global`)                   |
+| `GCP_KMS_BASE_URL`   | Override the Cloud KMS endpoint (testing / VPC-SC) |
+| `GCP_KMS_KEY_RING`   | Used by `GcpKmsKey::from_env()`                    |
+| `GCP_KMS_KEY_NAME`   | Used by `GcpKmsKey::from_env()`                    |
 
 Already have a `GcpClient` configured for other services? Reuse it via the
 exported scope — keeps a single token cache across Sheets / Drive / KMS:
@@ -353,9 +360,11 @@ let kms = arche::gcp::kms::GcpKmsClient::new(
 #### Cloud Storage (GCS)
 
 Object upload / download / delete / list / head, plus V4-signed GET URLs.
-Bucket is per-call so one client can target many buckets. Uploads and
-downloads buffer the full object in memory — keep this in mind for large
-files.
+Bucket is per-call so one client can target many buckets.
+
+> [!WARNING]
+> Uploads and downloads **buffer the full object in memory** — fine for reports
+> and assets, but route large media through a streaming path instead.
 
 ```rust
 use arche::gcp::gcs::{get_gcs_client, GcsConfig};
@@ -399,10 +408,10 @@ let page = gcs.list("my-bucket", Some("reports/"), None, false).await?;
 let url = gcs.signed_get_url("my-bucket", "reports/q4.pdf", Some(Duration::from_secs(600)))?;
 ```
 
-| Env Var | Description |
-|---|---|
-| `GCS_BASE_URL` | Override the storage endpoint (testing / VPC-SC; ignored for signed URLs) |
-| `GCS_SIGNED_URL_EXPIRY_SECS` | Default expiry for `signed_get_url` (default: 900, max: 604800) |
+| Env Var                      | Description                                                               |
+| ---------------------------- | ------------------------------------------------------------------------- |
+| `GCS_BASE_URL`               | Override the storage endpoint (testing / VPC-SC; ignored for signed URLs) |
+| `GCS_SIGNED_URL_EXPIRY_SECS` | Default expiry for `signed_get_url` (default: 900, max: 604800)           |
 
 `upload` switches automatically to multipart when called — user metadata
 travels with the bytes in one request, no separate PATCH needed. Object names
@@ -437,67 +446,14 @@ let status = cdn.invalidation_status(&op.name).await?;
 assert_eq!(status.status, "DONE");
 ```
 
-| Env Var | Description |
-|---|---|
+| Env Var              | Description                                |
+| -------------------- | ------------------------------------------ |
 | `GCP_CDN_PROJECT_ID` | GCP project hosting the URL map (required) |
-| `GCP_CDN_URL_MAP` | Optional default URL map name |
-| `GCP_CDN_BASE_URL` | Override the Compute API endpoint |
+| `GCP_CDN_URL_MAP`    | Optional default URL map name              |
+| `GCP_CDN_BASE_URL`   | Override the Compute API endpoint          |
 
 **Scope:** global URL maps only — regional URL maps
 (`/regions/{region}/urlMaps/...`) are not supported and will return 404.
-
-#### OIDC login (Sign in with Google, or any OIDC provider)
-
-Server-side OAuth 2.0 + OpenID Connect in `arche::oidc`: build the authorize
-URL, exchange the returned code for tokens, verify the issued ID token. JWKS
-are cached in-memory and key rotation is handled transparently — every
-algorithm other than RS256 is rejected.
-
-Provider endpoints come from a `ProviderMetadata`: use the shipped `google()`
-preset, construct one statically, or fetch it via OIDC discovery.
-
-```rust
-use arche::gcp::oauth::google;
-use arche::oidc::{OidcClient, OidcConfig, ProviderMetadata, Verifier};
-
-let client = OidcClient::new(
-    google(),
-    OidcConfig {
-        client_id: "123.apps.googleusercontent.com".into(),
-        client_secret: "secret".into(),
-        redirect_uri: "https://app.example/auth/google/callback".into(),
-        scopes: None, // defaults to "openid email profile"
-    },
-)?;
-
-// Or any other provider via discovery (fetches /.well-known/openid-configuration).
-let acme = ProviderMetadata::discover_default("acme", "https://id.acme.example").await?;
-
-// 1. Redirect the user to the provider's consent screen.
-let url = client.auth_url(&state, &pkce_challenge);
-
-// 2. On callback, trade `code` for tokens.
-let tokens = client.exchange_code(&code, &pkce_verifier).await?;
-
-// 3. Verify the ID token into your own claims type. `audiences` is the
-//    allow-list — your client_id(s). Pass `serde_json::Value` for untyped access.
-#[derive(serde::Deserialize)]
-struct Claims { sub: String, email: String, email_verified: bool }
-
-let verifier = Verifier::new(client.provider())?;
-let claims: Claims = verifier
-    .verify_id_token(&tokens.id_token, &["123.apps.googleusercontent.com"])
-    .await?;
-println!("verified sub={}", claims.sub);
-```
-
-`Verifier` is cheap to construct and `Clone` — typically held once on
-`AppState`. `exp`/`iat`/`iss`/`aud` are validated regardless of your claims
-type; a valid token that doesn't fit your type is an internal error, not a
-401. Verification failures (bad signature, wrong audience, expired, unknown
-`kid` after a forced refresh) surface as `AppError::Unauthorized`; JWKS /
-token-endpoint / discovery outages as
-`AppError::DependencyFailed { upstream: "oidc-{provider}", … }`.
 
 #### Any other GCP REST API
 
@@ -616,15 +572,16 @@ let request = GenerateRequest::new(
 
 **Authentication:**
 
-| Method | When | Source |
-|---|---|---|
-| API Key | Gemini only | `VertexConfig::with_api_key(...)` or `VERTEX_API_KEY` / `GEMINI_API_KEY` env |
+| Method          | When               | Source                                                                                                             |
+| --------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| API Key         | Gemini only        | `VertexConfig::with_api_key(...)` or `VERTEX_API_KEY` / `GEMINI_API_KEY` env                                       |
 | Service Account | Gemini + Anthropic | `VertexConfig::with_service_account_key(ServiceAccountKey)` or `with_service_account_key_path("/path/to/sa.json")` |
 
-If an API key is present, it takes priority. Service account auth is required for
-Anthropic models. `VERTEX_PROJECT_ID` / `VERTEX_REGION` env vars override
-config; default region is `asia-south1`. Service-account credentials must be
-passed via `VertexConfig` — arche does not auto-resolve `GOOGLE_APPLICATION_CREDENTIALS`.
+> [!NOTE]
+> If an API key is present it takes priority; **Anthropic models require
+> service-account auth**. `VERTEX_PROJECT_ID` / `VERTEX_REGION` override config
+> (default region `asia-south1`). Service-account creds must be passed via
+> `VertexConfig` — arche does **not** auto-resolve `GOOGLE_APPLICATION_CREDENTIALS`.
 
 **Token cache** — every GCP REST call goes through a process-local token
 cache: JWT-bearer flow against `oauth2.googleapis.com/token`, signed RS256
@@ -632,6 +589,219 @@ with the service-account key, retried once on transient failures, refreshed
 60 s before expiry, single-flighted per `(client_email, scopes)` pair.
 
 ---
+
+### OIDC
+
+Both halves of OpenID Connect — speak **to** a provider, or **be** one.
+
+|               | `arche::oidc` (client)                       | `arche::oidc::server`                                       |
+| ------------- | -------------------------------------------- | ----------------------------------------------------------- |
+| **Role**      | Relying party — _"Sign in with Google"_      | Identity provider — _"Sign in with your service"_           |
+| **You get**   | authorize URL → code → **verified** ID token | validate → single-use code → **signed** ID token            |
+| **You bring** | provider metadata + your config              | four small trait impls (registry · signer · tokens · store) |
+
+Authorization-code flow with mandatory **PKCE** (S256), **RS256** ID tokens, and a
+JWKS cache that handles key rotation transparently. The two halves never share
+code — an interop test drives the client against the server over real HTTP to
+prove they speak the same dialect.
+
+> [!TIP]
+> Full walkthrough, both sequence diagrams, and a single hover-tooltip canvas live in [`docs/oidc/`](docs/oidc/README.md).
+
+#### Client — "Sign in with Google" (or any OIDC provider)
+
+Provider endpoints come from a `ProviderMetadata`: the shipped `google()` preset,
+a struct literal, or `ProviderMetadata::discover(...)` (fetches
+`/.well-known/openid-configuration`).
+
+```rust
+use arche::gcp::oauth::google;
+use arche::oidc::{OidcClient, OidcConfig, ProviderMetadata, Verifier};
+
+// Build once, hold on state — both are Clone.
+let client = OidcClient::new(
+    google(),                                        // or ProviderMetadata::discover(...).await?
+    OidcConfig {
+        client_id: "123.apps.googleusercontent.com".into(),
+        client_secret: "secret".into(),
+        redirect_uri: "https://app.example/auth/google/callback".into(),
+        scopes: None,                                // defaults to "openid email profile"
+    },
+)?;
+let verifier = Verifier::new(client.provider())?;
+
+// 1 ─ send the user to the provider's consent screen
+let url = client.auth_url(&state, &pkce_challenge);
+
+// 2 ─ on callback, trade the code for tokens
+let tokens = client.exchange_code(&code, &pkce_verifier).await?;
+
+// 3 ─ verify the ID token into YOUR claims type
+#[derive(serde::Deserialize)]
+struct Claims { sub: String, email: String, email_verified: bool }
+
+let claims: Claims = verifier
+    .verify_id_token(&tokens.id_token, &[client.client_id()])
+    .await?;
+```
+
+> [!NOTE]
+> `verify_id_token::<C>` validates RS256, the signing `kid` (against a rotation-aware
+> JWKS cache), the signature, and `iss` / `aud` / `exp` / `iat` / `nbf` (60 s skew) —
+> **then** deserializes into your `C`. A bad token is `AppError::Unauthorized` (the
+> real reason is logged at debug, never leaked); an unreachable provider is
+> `AppError::DependencyFailed`; a valid token that doesn't fit `C` is an internal
+> error, not a 401. Nonce is yours to check — put it in `C` and compare.
+
+#### Server — be your own identity provider
+
+arche runs the protocol logic; it does **not** serve HTTP. You wire four routes and
+call four methods. The server is generic over four capabilities — arche ships a
+built-in **only where correctness is _math_, never _policy_**:
+
+| Capability        | Trait               | Built-in                 | Bring your own when…                                                            |
+| ----------------- | ------------------- | ------------------------ | ------------------------------------------------------------------------------- |
+| Client resolution | `ClientRegistry`    | — _always yours_         | static list · DB · config service (override `verify_secret` for hashed secrets) |
+| Token signing     | `TokenSigner`       | `SigningKey` (local RSA) | keys live in KMS / HSM, or you rotate                                           |
+| Access tokens     | `AccessTokenIssuer` | — _always yours_         | opaque random · your own JWT · a stored token                                   |
+| Code storage      | `CodeStore`         | — _always yours_         | in-memory (single node) · Redis `GETDEL` · PG `DELETE…RETURNING`                |
+
+<details>
+<summary><b>1 &middot; Implement your four seams</b> — click to expand</summary>
+
+```rust
+use arche::error::AppError;
+use arche::oidc::server::{
+    AccessTokenIssuer, ClientRegistration, ClientRegistry, CodeStore,
+    IssuedAccessToken, PendingGrant, SigningKey,
+};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+
+// Signer: a local RSA key is the one built-in. Persist it — a fresh key
+// invalidates every issued ID token.  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
+let key = SigningKey::from_pem("2026-07-key", &std::fs::read_to_string("key.pem")?)?;
+
+// Registry: resolve partner apps. `verify_secret` is defaulted (constant-time
+// plaintext); override it when you store hashed secrets.
+struct StaticClients(Vec<ClientRegistration>);
+impl ClientRegistry for StaticClients {
+    async fn find(&self, id: &str) -> Result<Option<ClientRegistration>, AppError> {
+        Ok(self.0.iter().find(|c| c.client_id == id).cloned())
+    }
+}
+
+// Access token: opaque noise is fine when only the ID token is consumed;
+// mint a real JWT when something must verify it.
+struct OpaqueTokens;
+impl AccessTokenIssuer for OpaqueTokens {
+    async fn issue(&self, _g: &PendingGrant) -> Result<IssuedAccessToken, AppError> {
+        Ok(IssuedAccessToken { token: arche::utils::nano_id_of(43), expires_in: 3600 })
+    }
+}
+
+// Code store: `take` MUST be atomic delete-on-read (the single-use guarantee).
+// In-memory works on one node; behind a load balancer use Redis GETDEL / PG.
+#[derive(Default)]
+struct MemStore(Mutex<HashMap<String, (PendingGrant, Instant)>>);
+impl CodeStore for MemStore {
+    async fn put(&self, code: String, g: PendingGrant, ttl: Duration) -> Result<(), AppError> {
+        let exp = Instant::now().checked_add(ttl).unwrap_or_else(Instant::now);
+        self.0.lock().await.insert(code, (g, exp));
+        Ok(())
+    }
+    async fn take(&self, code: &str) -> Result<Option<PendingGrant>, AppError> {
+        Ok(self.0.lock().await.remove(code)
+            .filter(|(_, exp)| *exp > Instant::now())
+            .map(|(g, _)| g))
+    }
+}
+```
+
+</details>
+
+**2 &middot; Build the server** — once, at startup:
+
+```rust
+use arche::oidc::server::{OidcServer, OidcServerConfig};
+
+let server = OidcServer::new(
+    OidcServerConfig {
+        issuer: "https://id.example.com".into(),     // https; becomes `iss` + endpoint prefix
+        code_ttl: None,        // 5 min
+        id_token_ttl: None,    // 1 h
+        allowed_scopes: None,  // ["openid", "email", "profile"]
+    },
+    clients, key, OpaqueTokens, MemStore::default(),
+)?;
+```
+
+**3 &middot; Wire four routes** — each is one method call:
+
+```rust
+use arche::oidc::server::{DiscoveryDocument, OidcServerError, TokenRequest};
+
+// GET /.well-known/openid-configuration
+let mut doc = DiscoveryDocument::standard(server.issuer());   // all fields pub — override to taste
+Json(doc)
+
+// GET /jwks   (send Cache-Control: public, max-age=3600)
+Json(server.jwks_document())
+
+// GET /authorize
+let validated = match server.validate_authorize(&params).await {
+    Ok(v) => v,
+    Err(e) if e.redirectable() =>
+        return redirect(e.redirect_url(&params.redirect_uri, params.state.as_deref())?),
+    Err(e) => return bad_request(e.to_string()),   // unknown client / bad redirect — NEVER redirect
+};
+match session_user(&headers) {
+    Some(u) => redirect(server.issue_code(validated, u.id, u.claims()).await?),
+    None    => redirect("/login"),                 // stash `validated`, resume after login
+}
+
+// POST /token   (send Cache-Control: no-store on success)
+let req = TokenRequest { /* form fields */,
+    basic_auth: auth_header.and_then(TokenRequest::parse_basic_authorization) };
+match server.exchange(req).await {
+    Ok(payload)                        => json_no_store(payload),
+    Err(OidcServerError::Internal(_))  => server_error(),     // 5xx — infra, retryable
+    Err(e)                             => token_error(e.error_code()),   // 400 / 401
+}
+```
+
+> [!IMPORTANT]
+> **One instance, cloned per request — never one-per-request.** Build the `OidcServer`
+> once at startup and keep it on state; `.clone()` is a single refcount bump. This isn't
+> just efficiency: the `CodeStore` spans **two** requests — `/authorize` calls `put(code)`,
+> and `/token` (a _different_ request, seconds later) calls `take(code)`. A server rebuilt
+> per request hands the second call an empty store, and every login fails with `invalid_grant`.
+
+> [!TIP]
+> Keep it **isolated**: hold the server in its own service state, reached through the `State`
+> extractor — no shared god-object, no middleware required. Give each service its own state
+> and compose routers; reserve shared state for truly-global primitives (DB pools, secrets).
+
+**Claims are yours; protocol claims are arche's.** `issue_code(request, subject, claims)`
+takes the `sub` (1–255 ASCII) and any `Serialize` claims and mints them verbatim —
+**except** the reserved set (`iss`, `sub`, `aud`, `iat`, `exp`, `nbf`, `nonce`, `jti`,
+`azp`, `at_hash`, `c_hash`), which arche strips from your input and stamps itself.
+`auth_time` is deliberately _not_ reserved — you assert it (and must, to honor a
+`max_age` request). To resume after a login page, round-trip the serializable
+`ValidatedAuthorizeRequest` back into `issue_code`; it re-checks `client_id` /
+`redirect_uri` against the registry, so a tampered stash is rejected, not used.
+
+> [!WARNING]
+> Not supported, by design: refresh tokens, the client-credentials grant, and `/userinfo`
+> (claims ride in the ID token). Key rotation is a `TokenSigner` choice, not a limitation.
+
+**Deeper reading:**
+
+- [`docs/oidc/README.md`](docs/oidc/README.md) — index for both halves
+- [`docs/oidc/architecture.md`](docs/oidc/architecture.md) — the two halves, component diagram, four seams, where each defense lives
+- [`docs/oidc/sequence.md`](docs/oidc/sequence.md) — login flow both directions, what `state` / PKCE defend, error + wire tables
+- [`docs/oidc/extending.md`](docs/oidc/extending.md) — client & server quickstarts, code for each of the four traits
 
 ### LLM
 
@@ -656,14 +826,14 @@ let response = client.generate(&request).await?;
 
 **Types you'll use:**
 
-| Type | Purpose |
-|---|---|
-| `LlmProvider` (trait) | `generate()` + `stream_generate()` on a canonical `GenerateRequest`. Implement this to add a backend. |
-| `GenerateRequest` / `GenerateResponse` | Canonical request/response, provider-neutral |
-| `Message`, `Role`, `ContentPart` | Conversation turns — text, tool calls, tool results |
-| `StreamChunk` | `Text(String)` \| `ToolCall { id, name, arguments }` \| `Done { finish_reason, usage }` |
-| `ToolDefinition` + `ParameterSchema` | Strictly-typed tool descriptions; serializes to valid JSON Schema |
-| `Usage` | Token accounting (input/output/total) |
+| Type                                   | Purpose                                                                                               |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `LlmProvider` (trait)                  | `generate()` + `stream_generate()` on a canonical `GenerateRequest`. Implement this to add a backend. |
+| `GenerateRequest` / `GenerateResponse` | Canonical request/response, provider-neutral                                                          |
+| `Message`, `Role`, `ContentPart`       | Conversation turns — text, tool calls, tool results                                                   |
+| `StreamChunk`                          | `Text(String)` \| `ToolCall { id, name, arguments }` \| `Done { finish_reason, usage }`               |
+| `ToolDefinition` + `ParameterSchema`   | Strictly-typed tool descriptions; serializes to valid JSON Schema                                     |
+| `Usage`                                | Token accounting (input/output/total)                                                                 |
 
 **Writing a custom backend:**
 
@@ -746,17 +916,17 @@ let stream = engine.run(&ShoppingFlow, &mut session, "find red shoes");
 
 **What arche provides vs. what you write:**
 
-| Arche provides | You write |
-|---|---|
+| Arche provides                                                                                          | You write                                                                                         |
+| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | Orchestration loop, streaming, SSE event types, session mutation, tool-calling loop, history compaction | System prompt, tool schemas, tool executors (`impl AgentFlow`), HTTP handler, session persistence |
 
 **Extension points:**
 
-| Need | Plug point |
-|---|---|
-| Different LLM backend | `impl LlmProvider for YourClient` |
-| Custom history compaction (vector recall, server-side memory) | `impl HistoryCompactor` |
-| Custom UI events from tools | `ToolOutput::text(..).data(type, payload)` → reaches client via `SseEvent::Data` |
+| Need                                                          | Plug point                                                                       |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Different LLM backend                                         | `impl LlmProvider for YourClient`                                                |
+| Custom history compaction (vector recall, server-side memory) | `impl HistoryCompactor`                                                          |
+| Custom UI events from tools                                   | `ToolOutput::text(..).data(type, payload)` → reaches client via `SseEvent::Data` |
 
 **Deeper reading:**
 
@@ -779,14 +949,14 @@ let pool = get_pg_pool(None).await?;
 let is_healthy = test_pg(pool.clone()).await?;
 ```
 
-| Env Var | Description |
-|---|---|
-| `PG_HOST` | Database host |
-| `PG_PORT` | Database port |
-| `PG_DATABASE` | Database name |
-| `PG_MAX_CONN` | Maximum pool connections |
-| `PG_USERNAME` | Username |
-| `PG_PASSWORD` | Password |
+| Env Var          | Description                                                                      |
+| ---------------- | -------------------------------------------------------------------------------- |
+| `PG_HOST`        | Database host                                                                    |
+| `PG_PORT`        | Database port                                                                    |
+| `PG_DATABASE`    | Database name                                                                    |
+| `PG_MAX_CONN`    | Maximum pool connections                                                         |
+| `PG_USERNAME`    | Username                                                                         |
+| `PG_PASSWORD`    | Password                                                                         |
 | `PG_CREDENTIALS` | JSON string `{"username":"...","password":"..."}` (alternative to separate vars) |
 
 #### Redis
@@ -800,12 +970,12 @@ let pool = get_redis_pool(None).await?;
 let is_healthy = test_redis(pool.clone()).await?;
 ```
 
-| Env Var | Description |
-|---|---|
-| `REDIS_HOST` | Redis host |
-| `REDIS_PORT` | Redis port |
+| Env Var          | Description              |
+| ---------------- | ------------------------ |
+| `REDIS_HOST`     | Redis host               |
+| `REDIS_PORT`     | Redis port               |
 | `REDIS_MAX_CONN` | Maximum pool connections |
-| `REDIS_PASSWORD` | Optional password |
+| `REDIS_PASSWORD` | Optional password        |
 
 #### ClickHouse
 
@@ -831,35 +1001,43 @@ let counts: Vec<EventCount> = conn
 ```
 
 Notes:
-- Bare `SELECT *` / `SELECT t.*` are blocked. Call `.allow_select_star()`
-  on a query, set `.allow_select_star(true)` on the config, or set
-  `CLICKHOUSE_ALLOW_SELECT_STAR=true` to bypass.
-- For runtime-constructed SQL use `conn.query_dynamic(string)` /
-  `conn.execute_dynamic(string)` — these accept `String` and shift
-  injection-safety responsibility to the caller.
-- Writes go through Kafka → Kafka Connect ClickHouse Sink, not this
-  connector.
 
-| Env Var | Description | Default |
-|---|---|---|
-| `CLICKHOUSE_HOSTS` | Comma-separated replica hostnames | — (required) |
-| `CLICKHOUSE_HOST` | Single-host fallback if `CLICKHOUSE_HOSTS` is unset | — |
-| `CLICKHOUSE_PORT` | Server port | 8443 (secure) / 8123 (plain) |
-| `CLICKHOUSE_DATABASE` | Default database | `default` |
-| `CLICKHOUSE_USERNAME` | Username | `default` |
-| `CLICKHOUSE_PASSWORD` | Password | (empty) |
-| `CLICKHOUSE_SECURE` | HTTPS toggle | `true` |
-| `CLICKHOUSE_MAX_POOL_SIZE` | Max pool connections | `32` |
-| `CLICKHOUSE_CONNECTION_TIMEOUT_MS` | Pool-acquire timeout | `5000` |
-| `CLICKHOUSE_REQUEST_TIMEOUT_MS` | Per-request `max_execution_time` | `30000` |
-| `CLICKHOUSE_COMPRESSION` | `lz4` or `none` | `none` |
-| `CLICKHOUSE_ALLOW_SELECT_STAR` | Global `SELECT *` escape hatch | `false` |
+- Bare `SELECT *` / `SELECT t.*` are blocked. Call `.allow_select_star()` on a
+  query, set `.allow_select_star(true)` on the config, or set
+  `CLICKHOUSE_ALLOW_SELECT_STAR=true` to bypass.
+- Writes go through Kafka → Kafka Connect ClickHouse Sink, not this connector.
+
+> [!WARNING]
+> `query` / `execute` take `&'static str` on purpose — user input can't be
+> concatenated into the SQL. Runtime-built SQL is still possible via
+> `query_dynamic(String)` / `execute_dynamic(String)`, but those **shift
+> injection-safety onto you**.
+
+| Env Var                            | Description                                         | Default                      |
+| ---------------------------------- | --------------------------------------------------- | ---------------------------- |
+| `CLICKHOUSE_HOSTS`                 | Comma-separated replica hostnames                   | — (required)                 |
+| `CLICKHOUSE_HOST`                  | Single-host fallback if `CLICKHOUSE_HOSTS` is unset | —                            |
+| `CLICKHOUSE_PORT`                  | Server port                                         | 8443 (secure) / 8123 (plain) |
+| `CLICKHOUSE_DATABASE`              | Default database                                    | `default`                    |
+| `CLICKHOUSE_USERNAME`              | Username                                            | `default`                    |
+| `CLICKHOUSE_PASSWORD`              | Password                                            | (empty)                      |
+| `CLICKHOUSE_SECURE`                | HTTPS toggle                                        | `true`                       |
+| `CLICKHOUSE_MAX_POOL_SIZE`         | Max pool connections                                | `32`                         |
+| `CLICKHOUSE_CONNECTION_TIMEOUT_MS` | Pool-acquire timeout                                | `5000`                       |
+| `CLICKHOUSE_REQUEST_TIMEOUT_MS`    | Per-request `max_execution_time`                    | `30000`                      |
+| `CLICKHOUSE_COMPRESSION`           | `lz4` or `none`                                     | `none`                       |
+| `CLICKHOUSE_ALLOW_SELECT_STAR`     | Global `SELECT *` escape hatch                      | `false`                      |
 
 ---
 
 ### JWT
 
 Token generation and verification using HS256.
+
+> [!NOTE]
+> This is symmetric **HS256** for your app's own access / refresh tokens. For
+> asymmetric **RS256** ID tokens in an OIDC flow (signing or verifying "Sign in
+> with…" tokens), see [`oidc`](#oidc) — different keys, different purpose.
 
 ```rust
 use arche::jwt::{generate_tokens, verify_token, generate_expiry_time};
@@ -1014,6 +1192,11 @@ let mut stream = source.stream_array("results").await;
 
 AES-128-CBC encryption with PBKDF2-HMAC-SHA1 key derivation (65,536 iterations).
 
+> [!NOTE]
+> The `salt` must be **≥ 16 bytes**. This is a fixed CBC + PBKDF2-SHA1 scheme;
+> when you own both ends and want authenticated encryption, an AEAD cipher
+> (AES-GCM) is the stronger default.
+
 ```rust
 use arche::crypto::{encrypt_cbc, decrypt_cbc};
 
@@ -1069,23 +1252,27 @@ async fn handler() -> Result<impl axum::response::IntoResponse, AppError> {
 
 **Variants:**
 
-| Variant | Status | Constructor |
-|---|---|---|
-| `BadRequest` | 400 | `AppError::bad_request(errors, message, description)` |
-| `Unauthorized` | 401 | Direct construction |
-| `Forbidden` | 403 | Direct construction |
-| `NotFound` | 404 | `AppError::not_found("resource")` |
-| `Conflict` | 409 | `AppError::conflict("message")` |
-| `UnprocessableEntity` | 422 | `AppError::unprocessable_entity(errors, message, description)` |
-| `DependencyFailed` | 424 | `AppError::dependency_failed("upstream", "detail")` |
-| `InternalError` | 500 | `AppError::internal_error(error, message)` |
-| `Unavailable` | 503 | Direct construction |
+| Variant               | Status | Constructor                                                    |
+| --------------------- | ------ | -------------------------------------------------------------- |
+| `BadRequest`          | 400    | `AppError::bad_request(errors, message, description)`          |
+| `Unauthorized`        | 401    | Direct construction                                            |
+| `Forbidden`           | 403    | Direct construction                                            |
+| `NotFound`            | 404    | `AppError::not_found("resource")`                              |
+| `Conflict`            | 409    | `AppError::conflict("message")`                                |
+| `UnprocessableEntity` | 422    | `AppError::unprocessable_entity(errors, message, description)` |
+| `DependencyFailed`    | 424    | `AppError::dependency_failed("upstream", "detail")`            |
+| `InternalError`       | 500    | `AppError::internal_error(error, message)`                     |
+| `Unavailable`         | 503    | Direct construction                                            |
 
 `InternalError` responses are **sanitized by default** — no leaked SQL or infra
-details. Enable `verbose-errors` to expose raw error details (dev/staging only):
+details.
+
+> [!WARNING]
+> The `verbose-errors` feature echoes raw error details into responses. Enable
+> it in dev / staging only — **never in production**.
 
 ```toml
-arche = { version = "4.7.0", features = ["verbose-errors"] }
+arche = { version = "4.10.0", features = ["verbose-errors"] }
 ```
 
 ---
@@ -1143,7 +1330,7 @@ arche re-exports these crates so you don't need to add them separately:
 - **Production-first defaults** — sane defaults, sanitized errors, pooled connections
 - **Async-native** — built on Tokio from the ground up
 
-## What arche is *not*
+## What arche is _not_
 
 - A framework that replaces Axum
 - A code generator or project template

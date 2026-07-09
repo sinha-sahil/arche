@@ -43,7 +43,10 @@ impl State {
         let Some(exp) = self.expires_at else {
             return false;
         };
-        Instant::now() < exp + self.ttl * STALE_GRACE_MULTIPLIER
+        match exp.checked_add(self.ttl * STALE_GRACE_MULTIPLIER) {
+            Some(deadline) => Instant::now() < deadline,
+            None => true,
+        }
     }
 }
 
@@ -78,7 +81,7 @@ impl JwksCache {
         match fetch(http, &self.endpoint, &self.dependency).await {
             Ok((keys, ttl)) => {
                 state.keys = keys.into_iter().map(|k| (k.kid.clone(), k)).collect();
-                state.expires_at = Some(Instant::now() + ttl);
+                state.expires_at = Instant::now().checked_add(ttl);
                 state.ttl = ttl;
                 state
                     .keys
