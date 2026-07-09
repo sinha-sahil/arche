@@ -133,6 +133,42 @@ Rule of thumb: **state** stops the attacker's code landing in the victim's
 session; **PKCE** stops the victim's code being redeemed in the attacker's
 session.
 
+## Refresh tokens (opt-in via `offline_access`)
+
+Long-lived sessions without re-prompting. Off unless the granted scope
+includes `offline_access` (operator adds it to `allowed_scopes`; your
+`/authorize` handler decides whether to grant it).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant RP as Partner backend
+    participant S as OidcServer
+    participant CS as CodeStore<br/>(yours)
+    participant RS as RefreshTokenStore<br/>(yours)
+
+    Note over RP,RS: First /token — code exchange with offline_access granted
+    RP->>S: POST /token (grant_type=authorization_code, code, verifier)
+    S->>CS: take(code) → grant (scope includes offline_access)
+    S->>RS: put(refresh_token, grant, refresh_ttl)
+    S-->>RP: { id_token, access_token, refresh_token }
+
+    Note over RP,RS: Later /token — rotate
+    RP->>S: POST /token (grant_type=refresh_token, refresh_token=RT₁ + client auth)
+    S->>RS: take(RT₁) → grant   (RT₁ now GONE)
+    S->>S: check grant.client_id == authenticated client; drop one-time nonce
+    S->>RS: put(RT₂, grant, refresh_ttl)   (rotation)
+    S-->>RP: { id_token (fresh), access_token (fresh), refresh_token=RT₂ }
+
+    Note over RP,S: Replay of RT₁ → take() finds nothing → invalid_grant
+```
+
+The `take`-then-`put` is rotation: each refresh invalidates the previous
+token and mints a new one. Because `take` is delete-on-read, a replayed
+(already-rotated) token is rejected — the same single-use mechanic as
+authorization codes. Claims are snapshotted at authorization; arche re-mints
+them verbatim (minus `nonce`), as it has no user model to re-fetch.
+
 ## Error paths (server)
 
 All redirectable errors flow back to the partner as `?error=<code>`; the two

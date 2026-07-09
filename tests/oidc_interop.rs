@@ -12,11 +12,10 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use common::{TestRegistry, TestStore, TestTokens, pem};
+use common::{TestRefreshStore, TestRegistry, TestStore, TestTokens, pem};
 use reqwest::Url;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 
 const VERIFIER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const REDIRECT_URI: &str = "https://app.example/cb";
@@ -25,13 +24,15 @@ fn challenge() -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()))
 }
 
-type Srv = Arc<OidcServer<TestRegistry, SigningKey, TestTokens, TestStore>>;
+// OidcServer is already cheaply Clone (internal Arc) — no external Arc needed.
+type Srv = OidcServer<TestRegistry, SigningKey, TestTokens, TestStore, TestRefreshStore>;
 
 fn server_for(issuer: &str) -> Srv {
     let config = OidcServerConfig {
         issuer: issuer.into(),
         code_ttl: None,
         id_token_ttl: None,
+        refresh_token_ttl: None,
         allowed_scopes: None,
     };
     let clients = TestRegistry(vec![ClientRegistration {
@@ -39,16 +40,15 @@ fn server_for(issuer: &str) -> Srv {
         client_secret: "e2e-secret".into(),
         redirect_uris: vec![REDIRECT_URI.into()],
     }]);
-    Arc::new(
-        OidcServer::new(
-            config,
-            clients,
-            SigningKey::from_pem("k1", &pem()).unwrap(),
-            TestTokens,
-            TestStore::default(),
-        )
-        .unwrap(),
+    OidcServer::new(
+        config,
+        clients,
+        SigningKey::from_pem("k1", &pem()).unwrap(),
+        TestTokens,
+        TestStore::default(),
+        TestRefreshStore::default(),
     )
+    .unwrap()
 }
 
 async fn discovery_handler(State(server): State<Srv>) -> Response {
@@ -81,9 +81,14 @@ async fn authorize_handler(
 #[derive(Deserialize)]
 struct TokenForm {
     grant_type: String,
+    #[serde(default)]
     code: String,
+    #[serde(default)]
     code_verifier: String,
+    #[serde(default)]
     redirect_uri: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
     #[serde(default)]
     client_id: Option<String>,
     #[serde(default)]
@@ -104,6 +109,7 @@ async fn token_handler(
         code: form.code,
         code_verifier: form.code_verifier,
         redirect_uri: form.redirect_uri,
+        refresh_token: form.refresh_token,
         client_id: form.client_id,
         client_secret: form.client_secret,
         basic_auth,

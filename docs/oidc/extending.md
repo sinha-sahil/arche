@@ -1,7 +1,7 @@
 # Extending
 
 The client side is turnkey — you configure it. The server side is generic
-over four traits you implement.
+over five traits you implement.
 
 | You want to | Plug into |
 |---|---|
@@ -10,6 +10,7 @@ over four traits you implement.
 | Sign ID tokens (local key, or KMS/HSM, or rotation) | `impl TokenSigner`, or the built-in `SigningKey` |
 | Mint the access token (opaque, or your own JWT) | `impl AccessTokenIssuer` |
 | Persist single-use codes (memory, Redis, Postgres) | `impl CodeStore` |
+| Persist refresh tokens (opt-in via `offline_access`) | `impl RefreshTokenStore` |
 
 Nothing in `arche::oidc::server` changes when you implement any of these.
 
@@ -77,12 +78,14 @@ let server = OidcServer::new(
         issuer: "https://id.example.com".into(), // https; iss + endpoint prefix
         code_ttl: None,        // default 5 min
         id_token_ttl: None,    // default 1 h
-        allowed_scopes: None,  // default ["openid","email","profile"], must include openid
+        refresh_token_ttl: None, // default 30 days
+        allowed_scopes: None,  // add "offline_access" here to enable refresh tokens
     },
     MyRegistry(/* ... */),                                  // ClientRegistry
     SigningKey::from_pem("2026-07-key", &pem)?,             // TokenSigner
     MyAccessTokens,                                         // AccessTokenIssuer
     MyStore(/* ... */),                                     // CodeStore
+    MyRefreshStore(/* ... */),                              // RefreshTokenStore
 )?;
 // server: Clone (cheap, Arc), lives on app state.
 ```
@@ -116,7 +119,7 @@ match server.exchange(req).await {
 }
 ```
 
-## The four seams
+## The five seams
 
 ### `ClientRegistry` — who may log in against you
 
@@ -245,7 +248,49 @@ different pods. Use a shared store that keeps `take` atomic: **Redis** `GETDEL`,
 or **Postgres** `DELETE ... RETURNING`. Same trait, `take` runs the atomic
 op instead of a map remove.
 
+### `RefreshTokenStore` — long-lived sessions (opt-in)
+
+Refresh tokens are off unless a client is granted the `offline_access` scope
+(add it to `allowed_scopes`; your `/authorize` handler decides whether to
+grant it — that consent is yours to obtain). When granted, the
+`authorization_code` exchange returns a `refresh_token`; a later
+`grant_type=refresh_token` call re-mints the ID/access tokens and **rotates**
+the refresh token — arche drops the one-time `nonce`, keeps your original
+claims (snapshotted at authorization; arche has no user model to re-fetch),
+and issues a fresh token, invalidating the old one. A replayed token gets
+`invalid_grant`.
+
+The trait is the exact shape of `CodeStore` — so back it with the same
+infrastructure (a different Redis prefix, a second table):
+
+```rust
+use arche::oidc::server::{PendingGrant, RefreshTokenStore};
+use arche::error::AppError;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+
+#[derive(Default)]
+struct MemRefreshStore(Mutex<HashMap<String, (PendingGrant, Instant)>>);
+
+impl RefreshTokenStore for MemRefreshStore {
+    async fn put(&self, token: String, grant: PendingGrant, ttl: Duration) -> Result<(), AppError> {
+        let expires = Instant::now().checked_add(ttl).unwrap_or_else(Instant::now);
+        self.0.lock().await.insert(token, (grant, expires));
+        Ok(())
+    }
+    async fn take(&self, token: &str) -> Result<Option<PendingGrant>, AppError> {
+        Ok(self.0.lock().await.remove(token)
+            .filter(|(_, exp)| *exp > Instant::now())
+            .map(|(g, _)| g))
+    }
+}
+```
+
+`take` is delete-on-read — that is what makes rotation and reuse-invalidation
+automatic, exactly as for codes.
+
 ## Not supported (deliberately, for now)
 
-Refresh tokens, the client-credentials grant, and `/userinfo` (claims ride in
-the ID token). Key rotation is a `TokenSigner` choice, not a limitation.
+The client-credentials grant and `/userinfo` (claims ride in the ID token).
+Key rotation is a `TokenSigner` choice, not a limitation.

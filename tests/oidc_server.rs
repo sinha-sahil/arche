@@ -8,7 +8,7 @@ use arche::oidc::server::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use common::{TestRegistry, TestStore, TestTokens, pem};
+use common::{TestRefreshStore, TestRegistry, TestStore, TestTokens, pem};
 use reqwest::Url;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -17,7 +17,7 @@ use std::time::Duration;
 const ISSUER: &str = "https://id.example.com";
 const VERIFIER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-type TestServer = OidcServer<TestRegistry, SigningKey, TestTokens, TestStore>;
+type TestServer = OidcServer<TestRegistry, SigningKey, TestTokens, TestStore, TestRefreshStore>;
 
 fn challenge_of(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
@@ -28,6 +28,7 @@ fn config() -> OidcServerConfig {
         issuer: ISSUER.into(),
         code_ttl: None,
         id_token_ttl: None,
+        refresh_token_ttl: None,
         allowed_scopes: None,
     }
 }
@@ -51,7 +52,20 @@ fn server_with(config: OidcServerConfig) -> Result<TestServer, AppError> {
         signer(),
         TestTokens,
         TestStore::default(),
+        TestRefreshStore::default(),
     )
+}
+
+fn offline_config() -> OidcServerConfig {
+    OidcServerConfig {
+        allowed_scopes: Some(vec![
+            "openid".into(),
+            "email".into(),
+            "profile".into(),
+            "offline_access".into(),
+        ]),
+        ..config()
+    }
 }
 
 fn server() -> TestServer {
@@ -88,6 +102,20 @@ fn token_request(code: &str) -> TokenRequest {
         code: code.into(),
         code_verifier: VERIFIER.into(),
         redirect_uri: "https://app.example/cb".into(),
+        refresh_token: None,
+        client_id: Some("cid".into()),
+        client_secret: Some("secret".into()),
+        basic_auth: None,
+    }
+}
+
+fn refresh_request(refresh_token: &str) -> TokenRequest {
+    TokenRequest {
+        grant_type: "refresh_token".into(),
+        code: String::new(),
+        code_verifier: String::new(),
+        redirect_uri: String::new(),
+        refresh_token: Some(refresh_token.into()),
         client_id: Some("cid".into()),
         client_secret: Some("secret".into()),
         basic_auth: None,
@@ -795,10 +823,12 @@ mod types {
             token_type: "Bearer".into(),
             expires_in: 3600,
             scope: "openid".into(),
+            refresh_token: Some("rt-secret".into()),
         };
         let out = format!("{payload:?}");
         assert!(out.contains("<redacted>"));
         assert!(!out.contains("atk-secret"));
+        assert!(!out.contains("rt-secret"));
         assert!(!out.contains("idt-secret"));
     }
 
@@ -825,5 +855,194 @@ mod types {
         assert_eq!(doc.token_endpoint, "https://id.example.com/token");
         assert_eq!(doc.jwks_uri, "https://id.example.com/jwks");
         assert_eq!(doc.code_challenge_methods_supported, ["S256"]);
+    }
+
+    #[test]
+    fn discovery_reserves_optional_endpoints_omitted_until_set() {
+        // Reserved endpoints are omitted by default; each emits exactly its key when set.
+        let v = serde_json::to_value(DiscoveryDocument::standard(ISSUER)).unwrap();
+        let obj = v.as_object().unwrap();
+        for key in [
+            "userinfo_endpoint",
+            "end_session_endpoint",
+            "revocation_endpoint",
+            "introspection_endpoint",
+        ] {
+            assert!(!obj.contains_key(key), "{key} should be omitted by default");
+        }
+
+        let mut doc = DiscoveryDocument::standard(ISSUER);
+        doc.userinfo_endpoint = Some(format!("{ISSUER}/userinfo"));
+        doc.end_session_endpoint = Some(format!("{ISSUER}/logout"));
+        doc.revocation_endpoint = Some(format!("{ISSUER}/revoke"));
+        doc.introspection_endpoint = Some(format!("{ISSUER}/introspect"));
+        let v = serde_json::to_value(&doc).unwrap();
+        assert_eq!(v["userinfo_endpoint"], format!("{ISSUER}/userinfo"));
+        assert_eq!(v["end_session_endpoint"], format!("{ISSUER}/logout"));
+        assert_eq!(v["revocation_endpoint"], format!("{ISSUER}/revoke"));
+        assert_eq!(v["introspection_endpoint"], format!("{ISSUER}/introspect"));
+    }
+
+    #[test]
+    fn discovery_advertises_only_what_arche_actually_supports() {
+        let doc = DiscoveryDocument::standard(ISSUER);
+        // arche accepts only response_mode=query and rejects request_uri (JAR),
+        // so it overrides the spec's optimistic defaults instead of omitting these.
+        assert_eq!(doc.response_modes_supported, ["query"]);
+        assert!(!doc.request_uri_parameter_supported);
+    }
+}
+
+mod refresh {
+    use super::*;
+
+    async fn issue_offline_code(server: &TestServer) -> String {
+        let mut p = authorize_params();
+        p.scope = Some("openid offline_access".into());
+        let validated = server.validate_authorize(&p).await.unwrap();
+        let url = server
+            .issue_code(validated, "u1", json!({ "email": "u@e.co" }))
+            .await
+            .unwrap();
+        code_from(&url)
+    }
+
+    #[tokio::test]
+    async fn offline_access_scope_issues_a_refresh_token() {
+        let server = server_with(offline_config()).unwrap();
+        let code = issue_offline_code(&server).await;
+        let payload = server.exchange(token_request(&code)).await.unwrap();
+        assert!(payload.refresh_token.is_some());
+        assert!(payload.scope.split(' ').any(|s| s == "offline_access"));
+    }
+
+    #[tokio::test]
+    async fn no_offline_access_means_no_refresh_token() {
+        // Even on an offline-capable server, a code without the scope gets none.
+        let server = server_with(offline_config()).unwrap();
+        let code = issue(&server).await; // default scope: openid email profile
+        let payload = server.exchange(token_request(&code)).await.unwrap();
+        assert!(payload.refresh_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_grant_rotates_and_mints_fresh_tokens() {
+        let server = server_with(offline_config()).unwrap();
+        let code = issue_offline_code(&server).await;
+        let first = server.exchange(token_request(&code)).await.unwrap();
+        let rt1 = first.refresh_token.clone().unwrap();
+
+        let second = server.exchange(refresh_request(&rt1)).await.unwrap();
+        let rt2 = second.refresh_token.clone().unwrap();
+
+        // rotated: a new refresh token, and a fresh, verifiable ID token
+        assert_ne!(rt1, rt2);
+        assert!(!second.access_token.is_empty());
+        let claims = jwt_payload(&second.id_token);
+        assert_eq!(claims["sub"], "u1");
+        assert_eq!(claims["iss"], ISSUER);
+        // nonce is one-time — not replayed into refresh-minted ID tokens
+        assert!(claims.get("nonce").is_none());
+        // consumer claims are re-minted from the stored grant
+        assert_eq!(claims["email"], "u@e.co");
+    }
+
+    #[tokio::test]
+    async fn reused_refresh_token_is_rejected() {
+        let server = server_with(offline_config()).unwrap();
+        let code = issue_offline_code(&server).await;
+        let rt = server
+            .exchange(token_request(&code))
+            .await
+            .unwrap()
+            .refresh_token
+            .unwrap();
+
+        server.exchange(refresh_request(&rt)).await.unwrap(); // rotates rt away
+        assert!(matches!(
+            server.exchange(refresh_request(&rt)).await.unwrap_err(),
+            OidcServerError::InvalidGrant(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_token_is_bound_to_its_client() {
+        let clients = TestRegistry(vec![
+            ClientRegistration {
+                client_id: "cid".into(),
+                client_secret: "secret".into(),
+                redirect_uris: vec!["https://app.example/cb".into()],
+            },
+            ClientRegistration {
+                client_id: "cid2".into(),
+                client_secret: "secret2".into(),
+                redirect_uris: vec!["https://app.example/cb".into()],
+            },
+        ]);
+        let server = OidcServer::new(
+            offline_config(),
+            clients,
+            signer(),
+            TestTokens,
+            TestStore::default(),
+            TestRefreshStore::default(),
+        )
+        .unwrap();
+
+        let code = issue_offline_code(&server).await; // issued to cid
+        let rt = server
+            .exchange(token_request(&code))
+            .await
+            .unwrap()
+            .refresh_token
+            .unwrap();
+
+        // cid2 authenticates fine but the token isn't theirs → invalid_grant
+        let mut req = refresh_request(&rt);
+        req.client_id = Some("cid2".into());
+        req.client_secret = Some("secret2".into());
+        assert!(matches!(
+            server.exchange(req).await.unwrap_err(),
+            OidcServerError::InvalidGrant(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_refresh_token_is_rejected() {
+        let mut c = offline_config();
+        c.refresh_token_ttl = Some(Duration::ZERO);
+        let server = server_with(c).unwrap();
+        let code = issue_offline_code(&server).await;
+        let rt = server
+            .exchange(token_request(&code))
+            .await
+            .unwrap()
+            .refresh_token
+            .unwrap();
+        assert!(matches!(
+            server.exchange(refresh_request(&rt)).await.unwrap_err(),
+            OidcServerError::InvalidGrant(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_without_a_token_is_rejected() {
+        let server = server_with(offline_config()).unwrap();
+        let mut req = refresh_request("");
+        req.refresh_token = None;
+        assert!(matches!(
+            server.exchange(req).await.unwrap_err(),
+            OidcServerError::InvalidGrant(_)
+        ));
+    }
+
+    #[test]
+    fn discovery_advertises_the_refresh_grant() {
+        let doc = DiscoveryDocument::standard(ISSUER);
+        assert!(
+            doc.grant_types_supported
+                .iter()
+                .any(|g| g == "refresh_token")
+        );
     }
 }

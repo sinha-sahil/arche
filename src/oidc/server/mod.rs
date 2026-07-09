@@ -11,12 +11,14 @@ use crate::utils::nano_id_of;
 
 mod access;
 mod keys;
+mod refresh;
 mod registry;
 mod store;
 mod types;
 
 pub use access::{AccessTokenIssuer, IssuedAccessToken};
 pub use keys::{SigningKey, TokenSigner, rsa_public_jwk};
+pub use refresh::RefreshTokenStore;
 pub use registry::ClientRegistry;
 pub use store::CodeStore;
 pub use types::{
@@ -25,31 +27,42 @@ pub use types::{
 };
 
 const CODE_LENGTH: usize = 43;
+const REFRESH_TOKEN_LENGTH: usize = 64;
 const DEFAULT_CODE_TTL: Duration = Duration::from_secs(300);
 const DEFAULT_ID_TOKEN_TTL: Duration = Duration::from_secs(3600);
+const DEFAULT_REFRESH_TOKEN_TTL: Duration = Duration::from_secs(30 * 86_400);
+const OFFLINE_ACCESS: &str = "offline_access";
 const RESERVED_CLAIMS: &[&str] = &[
     "iss", "sub", "aud", "exp", "iat", "nbf", "nonce", "jti", "azp", "at_hash", "c_hash",
 ];
 const DEFAULT_ALLOWED_SCOPES: &[&str] = &["openid", "email", "profile"];
 const MAX_SUBJECT_LENGTH: usize = 255;
 
-struct Inner<C, T, A, S> {
+struct Inner<C, T, A, S, R> {
     issuer: String,
     code_ttl: Duration,
     id_token_ttl: Duration,
+    refresh_token_ttl: Duration,
     allowed_scopes: Vec<String>,
     clients: C,
     signer: T,
     access_tokens: A,
     store: S,
+    refresh_store: R,
 }
 
-pub struct OidcServer<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore> {
-    inner: Arc<Inner<C, T, A, S>>,
+pub struct OidcServer<
+    C: ClientRegistry,
+    T: TokenSigner,
+    A: AccessTokenIssuer,
+    S: CodeStore,
+    R: RefreshTokenStore,
+> {
+    inner: Arc<Inner<C, T, A, S, R>>,
 }
 
-impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore> Clone
-    for OidcServer<C, T, A, S>
+impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore, R: RefreshTokenStore>
+    Clone for OidcServer<C, T, A, S, R>
 {
     fn clone(&self) -> Self {
         Self {
@@ -58,13 +71,16 @@ impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore> Clon
     }
 }
 
-impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore> OidcServer<C, T, A, S> {
+impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore, R: RefreshTokenStore>
+    OidcServer<C, T, A, S, R>
+{
     pub fn new(
         config: OidcServerConfig,
         clients: C,
         signer: T,
         access_tokens: A,
         store: S,
+        refresh_store: R,
     ) -> Result<Self, AppError> {
         let issuer = config.issuer.trim_end_matches('/').to_string();
         let parsed = Url::parse(&issuer).map_err(|e| {
@@ -112,11 +128,15 @@ impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore> Oidc
                 issuer,
                 code_ttl: config.code_ttl.unwrap_or(DEFAULT_CODE_TTL),
                 id_token_ttl: config.id_token_ttl.unwrap_or(DEFAULT_ID_TOKEN_TTL),
+                refresh_token_ttl: config
+                    .refresh_token_ttl
+                    .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL),
                 allowed_scopes,
                 clients,
                 signer,
                 access_tokens,
                 store,
+                refresh_store,
             }),
         })
     }
@@ -278,10 +298,17 @@ impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore> Oidc
     }
 
     pub async fn exchange(&self, req: TokenRequest) -> Result<TokenPayload, OidcServerError> {
-        if req.grant_type != "authorization_code" {
-            return Err(OidcServerError::UnsupportedGrantType(req.grant_type));
+        match req.grant_type.as_str() {
+            "authorization_code" => self.exchange_authorization_code(req).await,
+            "refresh_token" => self.exchange_refresh_token(req).await,
+            _ => Err(OidcServerError::UnsupportedGrantType(req.grant_type)),
         }
+    }
 
+    async fn exchange_authorization_code(
+        &self,
+        req: TokenRequest,
+    ) -> Result<TokenPayload, OidcServerError> {
         let (client_id, client_secret) = resolve_client_credentials(&req)?;
         if !self
             .inner
@@ -311,30 +338,102 @@ impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore> Oidc
         }
         verify_pkce(&req.code_verifier, &grant.request.code_challenge)?;
 
-        let id_token = self.mint_id_token(&grant).await?;
+        let with_refresh = scope_has_offline_access(&grant.request.scope);
+        self.issue_tokens(grant, with_refresh).await
+    }
+
+    async fn exchange_refresh_token(
+        &self,
+        req: TokenRequest,
+    ) -> Result<TokenPayload, OidcServerError> {
+        let (client_id, client_secret) = resolve_client_credentials(&req)?;
+        if !self
+            .inner
+            .clients
+            .verify_secret(&client_id, &client_secret)
+            .await?
+        {
+            return Err(OidcServerError::InvalidClient);
+        }
+
+        let presented = req
+            .refresh_token
+            .as_deref()
+            .ok_or_else(|| OidcServerError::InvalidGrant("missing refresh_token".into()))?;
+        let mut grant = self
+            .inner
+            .refresh_store
+            .take(presented)
+            .await?
+            .ok_or_else(|| {
+                OidcServerError::InvalidGrant("unknown or expired refresh_token".into())
+            })?;
+
+        if grant.request.client_id != client_id {
+            return Err(OidcServerError::InvalidGrant(
+                "refresh token issued to another client".into(),
+            ));
+        }
+        // `nonce` is one-time for the original authentication; never replayed.
+        grant.request.nonce = None;
+        self.issue_tokens(grant, true).await
+    }
+
+    async fn issue_tokens(
+        &self,
+        grant: PendingGrant,
+        with_refresh: bool,
+    ) -> Result<TokenPayload, OidcServerError> {
+        let id_token = self
+            .mint_id_token(
+                &grant.subject,
+                &grant.request.client_id,
+                &grant.claims,
+                grant.request.nonce.as_deref(),
+            )
+            .await?;
         let access = self.inner.access_tokens.issue(&grant).await?;
+
+        let refresh_token = if with_refresh {
+            let token = nano_id_of(REFRESH_TOKEN_LENGTH);
+            self.inner
+                .refresh_store
+                .put(token.clone(), grant.clone(), self.inner.refresh_token_ttl)
+                .await?;
+            Some(token)
+        } else {
+            None
+        };
+
         Ok(TokenPayload {
             access_token: access.token,
             id_token,
             token_type: "Bearer".into(),
             expires_in: access.expires_in,
             scope: grant.request.scope,
+            refresh_token,
         })
     }
 
-    async fn mint_id_token(&self, grant: &PendingGrant) -> Result<String, OidcServerError> {
+    async fn mint_id_token(
+        &self,
+        subject: &str,
+        audience: &str,
+        consumer_claims: &serde_json::Map<String, serde_json::Value>,
+        nonce: Option<&str>,
+    ) -> Result<String, OidcServerError> {
         let now = unix_now()?;
 
-        let mut claims = grant.claims.clone();
+        let mut claims = consumer_claims.clone();
         for reserved in RESERVED_CLAIMS {
             claims.remove(*reserved);
         }
-        if let Some(nonce) = &grant.request.nonce {
-            claims.insert("nonce".into(), nonce.clone().into());
+        if let Some(nonce) = nonce {
+            claims.insert("nonce".into(), nonce.to_string().into());
         }
         claims.insert("iss".into(), self.inner.issuer.clone().into());
-        claims.insert("sub".into(), grant.subject.clone().into());
-        claims.insert("aud".into(), grant.request.client_id.clone().into());
+        claims.insert("sub".into(), subject.to_string().into());
+        claims.insert("aud".into(), audience.to_string().into());
         claims.insert("iat".into(), now.into());
         claims.insert(
             "exp".into(),
@@ -425,6 +524,10 @@ fn is_valid_code_challenge(s: &str) -> bool {
 
 fn is_wellformed_scope(scope: &str) -> bool {
     scope.split(' ').all(is_scope_token) && scope.split(' ').any(|s| s == "openid")
+}
+
+fn scope_has_offline_access(scope: &str) -> bool {
+    scope.split(' ').any(|s| s == OFFLINE_ACCESS)
 }
 
 fn is_unreserved(s: &str) -> bool {

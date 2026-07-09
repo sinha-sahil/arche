@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use arche::error::AppError;
 use arche::oidc::server::{
     AccessTokenIssuer, ClientRegistration, ClientRegistry, CodeStore, IssuedAccessToken,
-    PendingGrant,
+    PendingGrant, RefreshTokenStore,
 };
 use tokio::sync::Mutex;
 
@@ -89,5 +89,28 @@ impl AccessTokenIssuer for TestTokens {
             token: arche::utils::nano_id_of(43),
             expires_in: 3600,
         })
+    }
+}
+
+#[derive(Default)]
+pub struct TestRefreshStore(Mutex<HashMap<String, (PendingGrant, Instant)>>);
+
+impl RefreshTokenStore for TestRefreshStore {
+    async fn put(&self, token: String, grant: PendingGrant, ttl: Duration) -> Result<(), AppError> {
+        let expires_at = Instant::now()
+            .checked_add(ttl)
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(31_536_000));
+        self.0.lock().await.insert(token, (grant, expires_at));
+        Ok(())
+    }
+
+    async fn take(&self, token: &str) -> Result<Option<PendingGrant>, AppError> {
+        Ok(self
+            .0
+            .lock()
+            .await
+            .remove(token)
+            .filter(|(_, expires_at)| *expires_at > Instant::now())
+            .map(|(grant, _)| grant))
     }
 }

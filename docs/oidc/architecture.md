@@ -8,7 +8,7 @@ Two independent halves of one protocol:
 2. **`arche::oidc::server` (identity provider)** — validate the authorize
    request, mint the single-use code, sign the ID token. arche owns the
    protocol; **you** own client resolution, code storage, token signing, and
-   access-token minting via four traits.
+   access-token minting, and refresh-token storage via five traits.
 
 Neither half imports the other in production code. The only cross-reference is
 one `use` line inside a `#[cfg(test)]` interop test that drives the client
@@ -41,6 +41,7 @@ flowchart LR
         TS(("TokenSigner<br/>trait"))
         AT(("AccessTokenIssuer<br/>trait"))
         CS(("CodeStore<br/>trait"))
+        RF(("RefreshTokenStore<br/>trait"))
         SK["SigningKey"]
         HELP["rsa_public_jwk()"]
         DD["DiscoveryDocument"]
@@ -62,10 +63,12 @@ flowchart LR
     OS -->|T| TS
     OS -->|A| AT
     OS -->|S| CS
+    OS -->|R| RF
     SK -. implements .-> TS
     Consumer -. implements .-> CR
     Consumer -. implements .-> AT
     Consumer -. implements .-> CS
+    Consumer -. implements .-> RF
     OS -->|mints and stores| PG
     OS -->|serves| DD
     OS -->|rejects with| OE
@@ -83,23 +86,24 @@ flowchart LR
     click CFG href "#oidcconfig" "Your registration at the provider: client_id, client_secret, redirect_uri (required), scopes (Option, defaults openid email profile). Debug redacts the secret."
     click GG href "#google" "arche::gcp::oauth::google() — a ProviderMetadata preset with Google's endpoints and quirks (prompt=select_account, access_type=online)."
 
-    click OS href "#oidcserver" "The protocol brain, generic over your four traits. new(config, clients, signer, access_tokens, store). Methods: validate_authorize, issue_code, exchange, jwks_document. Cheap to clone (Arc)."
+    click OS href "#oidcserver" "The protocol brain, generic over your five traits. new(config, clients, signer, access_tokens, store, refresh_store). Methods: validate_authorize, issue_code, exchange, jwks_document. Cheap to clone (Arc)."
     click CR href "#clientregistry" "YOU implement. find(client_id) -> Option<ClientRegistration>, plus a defaulted verify_secret (constant-time plaintext) you override for hashed secrets. No built-in."
     click TS href "#tokensigner" "YOU implement, or use SigningKey. kid() + async sign(bytes) + jwks(). arche builds the JWT; the signer just signs bytes — so a KMS/HSM impl is one API call."
     click AT href "#accesstokenissuer" "YOU implement. issue(grant) -> IssuedAccessToken { token, expires_in }. Opaque random, your own JWT, or a stored token. No built-in."
     click CS href "#codestore" "YOU implement. put(code, grant, ttl) + take(code) with atomic delete-on-read (the single-use guarantee). In-memory, Redis GETDEL, PG DELETE..RETURNING. No built-in."
+    click RF href "#refreshtokenstore" "YOU implement. Same shape as CodeStore: put(token, grant, ttl) + take(token). delete-on-read gives refresh-token rotation + reuse-invalidation. Only touched when a client is granted offline_access. No built-in."
     click SK href "#signingkey" "The built-in TokenSigner: an RSA private key loaded from PEM (from_pem(kid, pem), >=2048 bits), held in process. Signs RS256 locally, serves its public half in jwks(). Debug redacts."
     click HELP href "#rsa_public_jwk" "Helper: rsa_public_jwk(kid, public_pem) -> JWKS entry. Lets any custom TokenSigner build its jwks() in one call."
     click DD href "#discoverydocument" "Your public metadata — YOU build and serve it. standard(issuer) gives the conventional shape; all fields pub so you override endpoints/scopes/claims to match your routes."
     click OE href "#oidcservererror" "Protocol failure vocabulary (RFC 6749 codes). error_code(), redirectable(), redirect_url(uri, state) — which refuses to build a redirect for non-redirectable errors. Internal(AppError) for infra failures."
     click PG href "#pendinggrant" "What a code stands for between /authorize and /token: the validated request, the subject (sub), and your chosen claims. Stored in the CodeStore, keyed by the code."
 
-    click Consumer href "#consumer" "Your service: implementations of ClientRegistry / TokenSigner (or SigningKey) / AccessTokenIssuer / CodeStore, the four HTTP handlers, and the client-side login wiring."
+    click Consumer href "#consumer" "Your service: implementations of ClientRegistry / TokenSigner (or SigningKey) / AccessTokenIssuer / CodeStore / RefreshTokenStore, the four HTTP handlers, and the client-side login wiring."
 
     classDef trait fill:#f4e9ff,stroke:#8858c4,color:#333;
     classDef builtin fill:#e9f4ff,stroke:#3c78b8,color:#333;
     classDef consumer fill:#fff4e5,stroke:#c48e3c,color:#333;
-    class CR,TS,AT,CS trait
+    class CR,TS,AT,CS,RF trait
     class OC,PM,TR,VF,JC,CFG,GG,OS,SK,HELP,DD,OE,PG builtin
     class Consumer consumer
 ```
@@ -111,9 +115,9 @@ flowchart LR
 - **Blue-tinted** — concrete arche code (types, helpers, the built-in `SigningKey`).
 - **Orange-tinted** — consumer code (out of this crate).
 
-## The four server seams
+## The five server seams
 
-`OidcServer` is generic over four traits. The asymmetry is deliberate — a
+`OidcServer` is generic over five traits. The asymmetry is deliberate — a
 built-in exists only where it encodes *math*, never *policy*:
 
 | Trait | Built-in | Why |
@@ -122,6 +126,7 @@ built-in exists only where it encodes *math*, never *policy*:
 | `ClientRegistry` | **none** | Where partner registrations live (static, DB, config service) is your policy. |
 | `AccessTokenIssuer` | **none** | Whether the access token is opaque noise or a verifiable JWT is your policy. |
 | `CodeStore` | **none** | Where codes persist (memory vs. Redis/PG) is your deployment policy — and single-instance vs. clustered is a correctness choice only you can make. |
+| `RefreshTokenStore` | **none** | Same shape and reasoning as `CodeStore`; only exercised when a client is granted `offline_access`. |
 
 `SigningKey` is also **custody-only**: arche assembles the JWT (header,
 base64url, splice) inside `mint_id_token` and asks the signer only to *sign
@@ -137,6 +142,7 @@ rather than a JOSE project.
 | PKCE mandatory, S256 only, challenge format-checked | `validate_authorize` / `issue_code` | `server/mod.rs` |
 | `openid` scope required, tokens format-checked, narrowed to `allowed_scopes` | `validate_authorize` | `server/mod.rs` |
 | Code single-use | atomic delete-on-read in `take` | your `CodeStore` |
+| Refresh-token rotation + reuse-invalidation | atomic delete-on-read in `take`, re-issue on `exchange` | your `RefreshTokenStore` |
 | Code bound to client + redirect_uri; PKCE verifier matches | `exchange` vs. `PendingGrant`, `verify_pkce` | `server/mod.rs` |
 | Client secret compared in constant time | default `verify_secret` / your override | `registry.rs` |
 | Consumer claims can't forge protocol claims | `RESERVED_CLAIMS` strip in `mint_id_token` | `server/mod.rs` |
@@ -152,12 +158,12 @@ unreachable is `AppError::DependencyFailed`.
 
 ## Not supported (deliberately, for now)
 
-Refresh tokens, the client-credentials grant, and `/userinfo` (claims ride in
-the ID token). Key rotation is *not* an arche limitation — it is a
+The client-credentials grant and `/userinfo` (claims ride in the ID token).
+Key rotation is *not* an arche limitation — it is a
 `TokenSigner` implementation choice (serve several keys from `jwks()`, sign
 with the newest).
 
 ## Next
 
 - [sequence.md](sequence.md) — what a login looks like at runtime, both directions.
-- [extending.md](extending.md) — run a client, stand up the server, implement the four traits.
+- [extending.md](extending.md) — run a client, stand up the server, implement the five traits.

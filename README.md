@@ -656,7 +656,7 @@ let claims: Claims = verifier
 #### Server — be your own identity provider
 
 arche runs the protocol logic; it does **not** serve HTTP. You wire four routes and
-call four methods. The server is generic over four capabilities — arche ships a
+call four methods. The server is generic over five capabilities — arche ships a
 built-in **only where correctness is _math_, never _policy_**:
 
 | Capability        | Trait               | Built-in                 | Bring your own when…                                                            |
@@ -665,15 +665,16 @@ built-in **only where correctness is _math_, never _policy_**:
 | Token signing     | `TokenSigner`       | `SigningKey` (local RSA) | keys live in KMS / HSM, or you rotate                                           |
 | Access tokens     | `AccessTokenIssuer` | — _always yours_         | opaque random · your own JWT · a stored token                                   |
 | Code storage      | `CodeStore`         | — _always yours_         | in-memory (single node) · Redis `GETDEL` · PG `DELETE…RETURNING`                |
+| Refresh tokens    | `RefreshTokenStore` | — _always yours_         | any store with atomic delete-on-read — same shape as `CodeStore`                |
 
 <details>
-<summary><b>1 &middot; Implement your four seams</b> — click to expand</summary>
+<summary><b>1 &middot; Implement your five seams</b> — click to expand</summary>
 
 ```rust
 use arche::error::AppError;
 use arche::oidc::server::{
-    AccessTokenIssuer, ClientRegistration, ClientRegistry, CodeStore,
-    IssuedAccessToken, PendingGrant, SigningKey,
+    AccessTokenIssuer, ClientRegistration, ClientRegistry, CodeStore, IssuedAccessToken,
+    PendingGrant, RefreshTokenStore, SigningKey,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -717,6 +718,23 @@ impl CodeStore for MemStore {
             .map(|(g, _)| g))
     }
 }
+
+// Refresh store: identical shape — `take` is delete-on-read, giving rotation +
+// reuse-invalidation for free. Only touched when a client is granted `offline_access`.
+#[derive(Default)]
+struct MemRefreshStore(Mutex<HashMap<String, (PendingGrant, Instant)>>);
+impl RefreshTokenStore for MemRefreshStore {
+    async fn put(&self, token: String, g: PendingGrant, ttl: Duration) -> Result<(), AppError> {
+        let exp = Instant::now().checked_add(ttl).unwrap_or_else(Instant::now);
+        self.0.lock().await.insert(token, (g, exp));
+        Ok(())
+    }
+    async fn take(&self, token: &str) -> Result<Option<PendingGrant>, AppError> {
+        Ok(self.0.lock().await.remove(token)
+            .filter(|(_, exp)| *exp > Instant::now())
+            .map(|(g, _)| g))
+    }
+}
 ```
 
 </details>
@@ -729,11 +747,13 @@ use arche::oidc::server::{OidcServer, OidcServerConfig};
 let server = OidcServer::new(
     OidcServerConfig {
         issuer: "https://id.example.com".into(),     // https; becomes `iss` + endpoint prefix
-        code_ttl: None,        // 5 min
-        id_token_ttl: None,    // 1 h
-        allowed_scopes: None,  // ["openid", "email", "profile"]
+        code_ttl: None,           // 5 min
+        id_token_ttl: None,       // 1 h
+        refresh_token_ttl: None,  // 30 days
+        // Add "offline_access" here to enable refresh tokens for clients that request it:
+        allowed_scopes: None,     // ["openid", "email", "profile"]
     },
-    clients, key, OpaqueTokens, MemStore::default(),
+    clients, key, OpaqueTokens, MemStore::default(), MemRefreshStore::default(),
 )?;
 ```
 
@@ -792,16 +812,26 @@ takes the `sub` (1–255 ASCII) and any `Serialize` claims and mints them verbat
 `ValidatedAuthorizeRequest` back into `issue_code`; it re-checks `client_id` /
 `redirect_uri` against the registry, so a tampered stash is rejected, not used.
 
+> [!TIP]
+> **Refresh tokens** are opt-in per client via the `offline_access` scope. Add
+> `offline_access` to `allowed_scopes`; when a client requests it and you grant it,
+> `exchange` returns a `refresh_token` alongside the ID token. A subsequent
+> `grant_type=refresh_token` call **rotates** it — arche re-mints the ID/access
+> tokens (dropping the one-time `nonce`, keeping your original claims) and issues a
+> fresh refresh token, invalidating the old one via the store's atomic `take`. A
+> replayed old token gets `invalid_grant`. Claims are snapshotted at authorization
+> time — arche has no user model to re-fetch them.
+
 > [!WARNING]
-> Not supported, by design: refresh tokens, the client-credentials grant, and `/userinfo`
-> (claims ride in the ID token). Key rotation is a `TokenSigner` choice, not a limitation.
+> Not supported, by design: the client-credentials grant and `/userinfo` (claims
+> ride in the ID token). Key rotation is a `TokenSigner` choice, not a limitation.
 
 **Deeper reading:**
 
 - [`docs/oidc/README.md`](docs/oidc/README.md) — index for both halves
-- [`docs/oidc/architecture.md`](docs/oidc/architecture.md) — the two halves, component diagram, four seams, where each defense lives
+- [`docs/oidc/architecture.md`](docs/oidc/architecture.md) — the two halves, component diagram, five seams, where each defense lives
 - [`docs/oidc/sequence.md`](docs/oidc/sequence.md) — login flow both directions, what `state` / PKCE defend, error + wire tables
-- [`docs/oidc/extending.md`](docs/oidc/extending.md) — client & server quickstarts, code for each of the four traits
+- [`docs/oidc/extending.md`](docs/oidc/extending.md) — client & server quickstarts, code for each of the five traits
 
 ### LLM
 

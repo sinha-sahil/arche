@@ -29,6 +29,7 @@ pub struct OidcServerConfig {
     pub issuer: String,
     pub code_ttl: Option<Duration>,
     pub id_token_ttl: Option<Duration>,
+    pub refresh_token_ttl: Option<Duration>,
     pub allowed_scopes: Option<Vec<String>>,
 }
 
@@ -38,7 +39,16 @@ pub struct DiscoveryDocument {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
     pub jwks_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub userinfo_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub introspection_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_session_endpoint: Option<String>,
     pub response_types_supported: Vec<String>,
+    pub response_modes_supported: Vec<String>,
     pub grant_types_supported: Vec<String>,
     pub subject_types_supported: Vec<String>,
     pub id_token_signing_alg_values_supported: Vec<String>,
@@ -46,6 +56,7 @@ pub struct DiscoveryDocument {
     pub token_endpoint_auth_methods_supported: Vec<String>,
     pub scopes_supported: Vec<String>,
     pub claims_supported: Vec<String>,
+    pub request_uri_parameter_supported: bool,
 }
 
 impl DiscoveryDocument {
@@ -56,8 +67,13 @@ impl DiscoveryDocument {
             token_endpoint: format!("{issuer}/token"),
             jwks_uri: format!("{issuer}/jwks"),
             issuer,
+            userinfo_endpoint: None,
+            revocation_endpoint: None,
+            introspection_endpoint: None,
+            end_session_endpoint: None,
             response_types_supported: vec!["code".into()],
-            grant_types_supported: vec!["authorization_code".into()],
+            response_modes_supported: vec!["query".into()],
+            grant_types_supported: vec!["authorization_code".into(), "refresh_token".into()],
             subject_types_supported: vec!["public".into()],
             id_token_signing_alg_values_supported: vec!["RS256".into()],
             code_challenge_methods_supported: vec!["S256".into()],
@@ -73,6 +89,7 @@ impl DiscoveryDocument {
                 "iat".into(),
                 "exp".into(),
             ],
+            request_uri_parameter_supported: false,
         }
     }
 }
@@ -147,6 +164,7 @@ pub struct TokenRequest {
     pub code: String,
     pub code_verifier: String,
     pub redirect_uri: String,
+    pub refresh_token: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub basic_auth: Option<(String, String)>,
@@ -159,6 +177,10 @@ impl std::fmt::Debug for TokenRequest {
             .field("code", &"<redacted>")
             .field("code_verifier", &"<redacted>")
             .field("redirect_uri", &self.redirect_uri)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("client_id", &self.client_id)
             .field(
                 "client_secret",
@@ -199,6 +221,8 @@ pub struct TokenPayload {
     pub token_type: String,
     pub expires_in: u64,
     pub scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
 }
 
 impl std::fmt::Debug for TokenPayload {
@@ -209,6 +233,10 @@ impl std::fmt::Debug for TokenPayload {
             .field("token_type", &self.token_type)
             .field("expires_in", &self.expires_in)
             .field("scope", &self.scope)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
