@@ -44,6 +44,7 @@ struct Inner<C, T, A, S, R> {
     id_token_ttl: Duration,
     refresh_token_ttl: Duration,
     allowed_scopes: Vec<String>,
+    require_pkce: bool,
     clients: C,
     signer: T,
     access_tokens: A,
@@ -132,6 +133,7 @@ impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore, R: R
                     .refresh_token_ttl
                     .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL),
                 allowed_scopes,
+                require_pkce: config.require_pkce,
                 clients,
                 signer,
                 access_tokens,
@@ -181,21 +183,24 @@ impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore, R: R
             }
         }
 
-        let code_challenge = params
-            .code_challenge
-            .clone()
-            .ok_or(OidcServerError::MissingPkce)?;
-        match params.code_challenge_method.as_deref() {
-            Some("S256") => {}
-            other => {
-                return Err(OidcServerError::UnsupportedChallengeMethod(
-                    other.unwrap_or("<none>").to_string(),
-                ));
+        let code_challenge = match params.code_challenge.clone() {
+            Some(cc) => {
+                match params.code_challenge_method.as_deref() {
+                    Some("S256") => {}
+                    other => {
+                        return Err(OidcServerError::UnsupportedChallengeMethod(
+                            other.unwrap_or("<none>").to_string(),
+                        ));
+                    }
+                }
+                if !is_valid_code_challenge(&cc) {
+                    return Err(OidcServerError::MalformedCodeChallenge);
+                }
+                cc
             }
-        }
-        if !is_valid_code_challenge(&code_challenge) {
-            return Err(OidcServerError::MalformedCodeChallenge);
-        }
+            None if self.inner.require_pkce => return Err(OidcServerError::MissingPkce),
+            None => String::new(),
+        };
 
         let scope = self.granted_scope(params.scope.as_deref())?;
 
@@ -234,7 +239,7 @@ impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore, R: R
                 request.redirect_uri.clone(),
             ));
         }
-        if !is_valid_code_challenge(&request.code_challenge) {
+        if !request.code_challenge.is_empty() && !is_valid_code_challenge(&request.code_challenge) {
             return Err(OidcServerError::MalformedCodeChallenge);
         }
         if !is_wellformed_scope(&request.scope) {
@@ -336,7 +341,9 @@ impl<C: ClientRegistry, T: TokenSigner, A: AccessTokenIssuer, S: CodeStore, R: R
                 "redirect_uri mismatch".into(),
             ));
         }
-        verify_pkce(&req.code_verifier, &grant.request.code_challenge)?;
+        if !grant.request.code_challenge.is_empty() {
+            verify_pkce(&req.code_verifier, &grant.request.code_challenge)?;
+        }
 
         let with_refresh = scope_has_offline_access(&grant.request.scope);
         self.issue_tokens(grant, with_refresh).await

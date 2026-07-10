@@ -30,6 +30,7 @@ fn config() -> OidcServerConfig {
         id_token_ttl: None,
         refresh_token_ttl: None,
         allowed_scopes: None,
+        require_pkce: true,
     }
 }
 
@@ -1044,5 +1045,75 @@ mod refresh {
                 .iter()
                 .any(|g| g == "refresh_token")
         );
+    }
+}
+
+mod optional_pkce {
+    use super::*;
+
+    fn no_pkce_config() -> OidcServerConfig {
+        OidcServerConfig {
+            require_pkce: false,
+            ..config()
+        }
+    }
+
+    fn no_pkce_params() -> AuthorizeParams {
+        AuthorizeParams {
+            code_challenge: None,
+            code_challenge_method: None,
+            ..authorize_params()
+        }
+    }
+
+    #[tokio::test]
+    async fn require_pkce_true_rejects_missing_challenge() {
+        assert!(matches!(
+            server()
+                .validate_authorize(&no_pkce_params())
+                .await
+                .unwrap_err(),
+            OidcServerError::MissingPkce
+        ));
+    }
+
+    #[tokio::test]
+    async fn require_pkce_false_allows_full_flow_without_pkce() {
+        let server = server_with(no_pkce_config()).unwrap();
+        let validated = server.validate_authorize(&no_pkce_params()).await.unwrap();
+        assert_eq!(validated.code_challenge, "");
+        let url = server
+            .issue_code(
+                validated,
+                "u1",
+                json!({ "email": "u@e.co", "email_verified": true }),
+            )
+            .await
+            .unwrap();
+        let req = TokenRequest {
+            code_verifier: String::new(),
+            ..token_request(&code_from(&url))
+        };
+        let payload = server.exchange(req).await.unwrap();
+        assert!(!payload.id_token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pkce_still_verified_when_supplied_even_if_optional() {
+        let server = server_with(no_pkce_config()).unwrap();
+        let validated = server
+            .validate_authorize(&authorize_params())
+            .await
+            .unwrap();
+        assert_eq!(validated.code_challenge, challenge_of(VERIFIER));
+        let url = server.issue_code(validated, "u1", json!({})).await.unwrap();
+        let req = TokenRequest {
+            code_verifier: "b".repeat(43),
+            ..token_request(&code_from(&url))
+        };
+        assert!(matches!(
+            server.exchange(req).await.unwrap_err(),
+            OidcServerError::InvalidGrant(_)
+        ));
     }
 }

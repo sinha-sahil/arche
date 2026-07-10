@@ -34,6 +34,7 @@ fn server_for(issuer: &str) -> Srv {
         id_token_ttl: None,
         refresh_token_ttl: None,
         allowed_scopes: None,
+        require_pkce: true,
     };
     let clients = TestRegistry(vec![ClientRegistration {
         client_id: "e2e-client".into(),

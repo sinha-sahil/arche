@@ -31,6 +31,7 @@ pub struct OidcServerConfig {
     pub id_token_ttl: Option<Duration>,
     pub refresh_token_ttl: Option<Duration>,
     pub allowed_scopes: Option<Vec<String>>,
+    pub require_pkce: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
