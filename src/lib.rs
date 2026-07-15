@@ -9,6 +9,7 @@ pub mod gcp;
 pub mod json;
 pub mod jwt;
 pub mod llm;
+pub mod middleware;
 pub mod oidc;
 pub mod sockets;
 pub mod utils;

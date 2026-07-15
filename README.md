@@ -51,6 +51,7 @@ arche = "4.10.0"
 | [`crypto`](#crypto)     | AES-128-CBC encryption with PBKDF2 key derivation                                                                                                  |
 | [`sockets`](#sockets)   | WebSocket connection registry with broadcast                                                                                                       |
 | [`error`](#error)       | Axum-compatible structured error responses (400–503)                                                                                               |
+| [`middleware`](#middleware) | Axum layers — rewrites extractor rejections into `AppError` JSON so clients see one error contract                                             |
 | [`utils`](#utils)       | Alphanumeric nano IDs, timestamp validation, date/time conversions, pagination                                                                     |
 
 > [!TIP]
@@ -1304,6 +1305,40 @@ details.
 ```toml
 arche = { version = "4.10.0", features = ["verbose-errors"] }
 ```
+
+---
+
+### Middleware
+
+Axum layers that keep the wire format consistent with [`AppError`](#error).
+
+**`extractor_rejection`** — by default, when an axum extractor fails
+(malformed JSON body, missing `Content-Type`, wrong field type, oversized
+payload), axum replies with a plain-text 400/413/415/422 before your handler
+runs — bypassing the `AppError` shape entirely. This layer intercepts those
+rejection responses and rewrites them as `AppError::bad_request` JSON, so
+clients see one error contract everywhere. Handler-authored responses
+(already JSON) pass through untouched.
+
+```rust
+use axum::{middleware::from_fn, Router};
+
+let app: Router = Router::new()
+    // ...routes...
+    .layer(from_fn(arche::middleware::extractor_rejection));
+```
+
+```json
+// POST /plugin with body `{}` (missing field) now returns 400:
+{
+  "error_values": null,
+  "message": "Failed to deserialize the JSON body into the target type: missing field `plugin_id` at line 1 column 2",
+  "description": null
+}
+```
+
+Add the layer **before** any logging/tracing layers (inner-most position) so
+observability middleware sees the rewritten response.
 
 ---
 
