@@ -149,11 +149,9 @@ pub(crate) async fn generate(
     request: &GenerateRequest,
 ) -> Result<GenerateResponse, AppError> {
     let url = endpoint(&client.auth, &request.model, false)?;
-    let mut req = client.http.post(&url).json(&to_wire(request));
-
-    if let Some(auth) = client.auth_header().await? {
-        req = req.header("Authorization", auth);
-    }
+    let req = client
+        .authorize(client.http.post(&url).json(&to_wire(request)))
+        .await?;
 
     let resp = client.send(req).await?;
     let wire: Response = resp
@@ -171,11 +169,7 @@ pub(crate) async fn stream_generate(
     let url = endpoint(&client.auth, &request.model, true)?;
     let mut wire = to_wire(request);
     wire.stream = Some(true);
-    let mut req = client.http.post(&url).json(&wire);
-
-    if let Some(auth) = client.auth_header().await? {
-        req = req.header("Authorization", auth);
-    }
+    let req = client.authorize(client.http.post(&url).json(&wire)).await?;
 
     let resp = client.send(req).await?;
     Ok(parse_sse(resp))

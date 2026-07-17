@@ -128,11 +128,7 @@ pub(crate) async fn generate(
 ) -> Result<GenerateResponse, AppError> {
     let url = endpoint(&client.auth, &request.model, false);
     let wire = to_wire(request);
-    let mut req = client.http.post(&url).json(&wire);
-
-    if let Some(auth) = client.auth_header().await? {
-        req = req.header("Authorization", auth);
-    }
+    let req = client.authorize(client.http.post(&url).json(&wire)).await?;
 
     let resp = client.send(req).await?;
     let wire: Response = resp
@@ -148,14 +144,9 @@ pub(crate) async fn stream_generate(
     request: &GenerateRequest,
 ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk, AppError>> + Send>>, AppError> {
     let base = endpoint(&client.auth, &request.model, true);
-    let sep = if base.contains('?') { '&' } else { '?' };
-    let url = format!("{base}{sep}alt=sse");
+    let url = format!("{base}?alt=sse");
     let wire = to_wire(request);
-    let mut req = client.http.post(&url).json(&wire);
-
-    if let Some(auth) = client.auth_header().await? {
-        req = req.header("Authorization", auth);
-    }
+    let req = client.authorize(client.http.post(&url).json(&wire)).await?;
 
     let resp = client.send(req).await?;
     Ok(parse_sse(resp))
@@ -168,9 +159,9 @@ fn endpoint(auth: &ResolvedAuth, model: &str, stream: bool) -> String {
         "generateContent"
     };
     match auth {
-        ResolvedAuth::ApiKey { api_key } => format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}?key={api_key}"
-        ),
+        ResolvedAuth::ApiKey { .. } => {
+            format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}")
+        }
         ResolvedAuth::ServiceAccount {
             project_id, region, ..
         } => {
@@ -245,13 +236,16 @@ fn to_wire(req: &GenerateRequest) -> Request {
         || req.temperature.is_some()
         || req.top_p.is_some()
         || req.top_k.is_some()
+        || req.thinking_budget.is_some()
     {
         Some(GenConfig {
             max_output_tokens: req.max_tokens,
             temperature: req.temperature,
             top_p: req.top_p,
             top_k: req.top_k,
-            thinking_config: None,
+            thinking_config: req
+                .thinking_budget
+                .map(|thinking_budget| ThinkingConfig { thinking_budget }),
         })
     } else {
         None
@@ -434,5 +428,53 @@ fn find_frame_boundary(buf: &[u8]) -> Option<(usize, usize)> {
         (Some(c), None) => Some((c, 4)),
         (None, Some(l)) => Some((l, 2)),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_endpoint_never_carries_the_key() {
+        let auth = ResolvedAuth::ApiKey {
+            api_key: "secret-key".into(),
+        };
+        let url = endpoint(&auth, "gemini-2.5-flash", false);
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+
+        let stream_url = endpoint(&auth, "gemini-2.5-flash", true);
+        assert_eq!(
+            stream_url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent"
+        );
+        assert!(!url.contains("secret-key") && !stream_url.contains("secret-key"));
+    }
+
+    #[test]
+    fn to_wire_emits_thinking_config_when_budget_set() {
+        let req = GenerateRequest::new("m", vec![]).with_thinking_budget(0);
+        let json = serde_json::to_value(to_wire(&req)).unwrap();
+        assert_eq!(
+            json["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            0
+        );
+    }
+
+    #[test]
+    fn to_wire_omits_generation_config_without_knobs() {
+        let req = GenerateRequest::new("m", vec![]);
+        let json = serde_json::to_value(to_wire(&req)).unwrap();
+        assert!(json.get("generationConfig").is_none());
+    }
+
+    #[test]
+    fn to_wire_keeps_thinking_config_absent_when_only_other_knobs_set() {
+        let req = GenerateRequest::new("m", vec![]).with_temperature(0.0);
+        let json = serde_json::to_value(to_wire(&req)).unwrap();
+        assert!(json["generationConfig"].get("thinkingConfig").is_none());
     }
 }

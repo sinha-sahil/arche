@@ -103,6 +103,7 @@ pub struct GenerateRequest {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
+    pub thinking_budget: Option<u32>,
     pub tools: Vec<ToolDefinition>,
 }
 
@@ -116,6 +117,7 @@ impl GenerateRequest {
             temperature: None,
             top_p: None,
             top_k: None,
+            thinking_budget: None,
             tools: Vec::new(),
         }
     }
@@ -142,6 +144,11 @@ impl GenerateRequest {
 
     pub fn with_top_k(mut self, v: u32) -> Self {
         self.top_k = Some(v);
+        self
+    }
+
+    pub fn with_thinking_budget(mut self, v: u32) -> Self {
+        self.thinking_budget = Some(v);
         self
     }
 
@@ -474,6 +481,14 @@ mod tests {
         let schema = ParameterSchema::string_enum("choice", ["a", "b", "c"]);
         let json = serde_json::to_value(&schema).unwrap();
         assert_eq!(json["enum"], serde_json::json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn generate_request_thinking_budget_defaults_off_and_sets_via_builder() {
+        let req = GenerateRequest::new("m", vec![]);
+        assert!(req.thinking_budget.is_none());
+        let req = req.with_thinking_budget(0);
+        assert_eq!(req.thinking_budget, Some(0));
     }
 
     #[test]

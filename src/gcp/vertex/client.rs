@@ -26,14 +26,17 @@ impl VertexClient {
         }
     }
 
-    pub(crate) async fn auth_header(&self) -> Result<Option<String>, AppError> {
+    pub(crate) async fn authorize(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, AppError> {
         match &self.auth {
-            ResolvedAuth::ApiKey { .. } => Ok(None),
+            ResolvedAuth::ApiKey { api_key } => Ok(req.header("x-goog-api-key", api_key.as_str())),
             ResolvedAuth::ServiceAccount { token_source, .. } => {
                 let bearer = token_source
                     .access_token(&["https://www.googleapis.com/auth/cloud-platform"])
                     .await?;
-                Ok(Some(format!("Bearer {bearer}")))
+                Ok(req.header("Authorization", format!("Bearer {bearer}")))
             }
         }
     }
