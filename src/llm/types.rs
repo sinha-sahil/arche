@@ -95,6 +95,7 @@ impl Message {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct GenerateRequest {
     pub model: String,
     pub messages: Vec<Message>,
@@ -104,6 +105,8 @@ pub struct GenerateRequest {
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
     pub thinking_budget: Option<u32>,
+    /// Providers without a built-in fetcher ignore this.
+    pub web_fetch: bool,
     pub tools: Vec<ToolDefinition>,
 }
 
@@ -118,8 +121,19 @@ impl GenerateRequest {
             top_p: None,
             top_k: None,
             thinking_budget: None,
+            web_fetch: false,
             tools: Vec::new(),
         }
+    }
+
+    pub fn one_shot(
+        model: impl Into<String>,
+        system: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> Self {
+        Self::new(model, vec![Message::user(prompt)])
+            .with_system(system)
+            .with_temperature(0.0)
     }
 
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
@@ -149,6 +163,11 @@ impl GenerateRequest {
 
     pub fn with_thinking_budget(mut self, v: u32) -> Self {
         self.thinking_budget = Some(v);
+        self
+    }
+
+    pub fn with_web_fetch(mut self, enabled: bool) -> Self {
+        self.web_fetch = enabled;
         self
     }
 
@@ -188,6 +207,23 @@ impl GenerateResponse {
 
     pub fn stop_reason(&self) -> Option<&str> {
         self.stop_reason.as_deref()
+    }
+
+    /// Arguments of the **first** tool call; use [`GenerateResponse::tool_calls`] for the rest.
+    pub fn parse<T: serde::de::DeserializeOwned>(&self) -> Result<T, crate::error::AppError> {
+        let args = self
+            .content
+            .iter()
+            .find_map(|p| match p {
+                ContentPart::ToolCall { arguments, .. } => Some(arguments),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                crate::error::AppError::dependency_failed("llm", "model returned no tool call")
+            })?;
+        serde_json::from_value(args.clone()).map_err(|e| {
+            crate::error::AppError::dependency_failed("llm", format!("bad tool args: {e}"))
+        })
     }
 }
 
@@ -481,6 +517,24 @@ mod tests {
         let schema = ParameterSchema::string_enum("choice", ["a", "b", "c"]);
         let json = serde_json::to_value(&schema).unwrap();
         assert_eq!(json["enum"], serde_json::json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn one_shot_shape_sets_single_user_message_and_zero_temperature() {
+        let req = GenerateRequest::one_shot("m", "sys", "hello");
+        assert_eq!(req.messages.len(), 1);
+        assert_eq!(req.messages[0].role, Role::User);
+        assert_eq!(req.system.as_deref(), Some("sys"));
+        assert_eq!(req.temperature, Some(0.0));
+        assert!(req.tools.is_empty());
+        assert!(!req.web_fetch);
+    }
+
+    #[test]
+    fn generate_request_web_fetch_defaults_off_and_sets_via_builder() {
+        let req = GenerateRequest::new("m", vec![]);
+        assert!(!req.web_fetch);
+        assert!(req.with_web_fetch(true).web_fetch);
     }
 
     #[test]

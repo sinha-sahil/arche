@@ -204,6 +204,12 @@ fn endpoint(auth: &ResolvedAuth, model: &str, stream: bool) -> Result<String, Ap
 }
 
 fn to_wire(req: &GenerateRequest) -> Request {
+    if req.web_fetch {
+        tracing::warn!(
+            "web_fetch is unavailable for Anthropic on Vertex AI; the model cannot fetch pages"
+        );
+    }
+
     let messages = req
         .messages
         .iter()
@@ -455,6 +461,13 @@ fn find_frame_boundary(buf: &[u8]) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_fetch_is_dropped_rather_than_sent_to_anthropic() {
+        let req = GenerateRequest::new("m", vec![]).with_web_fetch(true);
+        let json = serde_json::to_value(to_wire(&req)).unwrap();
+        assert!(json.get("tools").is_none());
+    }
 
     #[test]
     fn value_to_tool_result_string_unwraps_json_string() {

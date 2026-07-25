@@ -54,11 +54,18 @@ struct FnResponse {
     response: serde_json::Value,
 }
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Tool {
-    function_declarations: Vec<FunctionDecl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_declarations: Option<Vec<FunctionDecl>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url_context: Option<UrlContext>,
 }
+
+/// An empty object enables the tool.
+#[derive(Default, Serialize)]
+struct UrlContext {}
 
 #[derive(Serialize)]
 struct FunctionDecl {
@@ -251,21 +258,34 @@ fn to_wire(req: &GenerateRequest) -> Request {
         None
     };
 
-    let tools = if req.tools.is_empty() {
-        None
-    } else {
-        Some(vec![Tool {
-            function_declarations: req
-                .tools
-                .iter()
-                .map(|t| FunctionDecl {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    parameters: t.parameters.clone(),
-                })
-                .collect(),
-        }])
-    };
+    let mut wire_tools: Vec<Tool> = Vec::new();
+    if !req.tools.is_empty() {
+        wire_tools.push(Tool {
+            function_declarations: Some(
+                req.tools
+                    .iter()
+                    .map(|t| FunctionDecl {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        parameters: t.parameters.clone(),
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+    }
+    if req.web_fetch && !req.tools.is_empty() {
+        tracing::warn!(
+            "web_fetch combined with custom tools is Preview and Gemini-3-only; older models reject it"
+        );
+    }
+    if req.web_fetch {
+        wire_tools.push(Tool {
+            url_context: Some(UrlContext {}),
+            ..Default::default()
+        });
+    }
+    let tools = (!wire_tools.is_empty()).then_some(wire_tools);
 
     Request {
         contents,
@@ -462,6 +482,47 @@ mod tests {
             json["generationConfig"]["thinkingConfig"]["thinkingBudget"],
             0
         );
+    }
+
+    #[test]
+    fn function_declarations_still_serialize_as_an_array() {
+        let req = GenerateRequest::new("m", vec![])
+            .with_tools(vec![crate::llm::ToolDefinition::new("report", "reports")]);
+        let json = serde_json::to_value(to_wire(&req)).unwrap();
+        let decls = json["tools"][0]["functionDeclarations"].as_array().unwrap();
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0]["name"], "report");
+    }
+
+    #[test]
+    fn web_fetch_maps_to_the_gemini_url_context_tool() {
+        let req = GenerateRequest::new("m", vec![]).with_web_fetch(true);
+        let json = serde_json::to_value(to_wire(&req)).unwrap();
+        assert_eq!(json["tools"][0]["urlContext"], serde_json::json!({}));
+        assert!(json["tools"][0].get("functionDeclarations").is_none());
+    }
+
+    #[test]
+    fn function_tools_and_web_fetch_are_separate_entries_in_the_tools_array() {
+        let tool = crate::llm::ToolDefinition::new("report", "reports");
+        let req = GenerateRequest::new("m", vec![])
+            .with_tools(vec![tool])
+            .with_web_fetch(true);
+        let json = serde_json::to_value(to_wire(&req)).unwrap();
+
+        let tools = json["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["functionDeclarations"][0]["name"], "report");
+        assert!(tools[0].get("urlContext").is_none());
+        assert_eq!(tools[1]["urlContext"], serde_json::json!({}));
+        assert!(tools[1].get("functionDeclarations").is_none());
+    }
+
+    #[test]
+    fn to_wire_omits_tools_when_nothing_requested() {
+        let req = GenerateRequest::new("m", vec![]);
+        let json = serde_json::to_value(to_wire(&req)).unwrap();
+        assert!(json.get("tools").is_none());
     }
 
     #[test]

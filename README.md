@@ -32,7 +32,7 @@ Add arche to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-arche = "4.10.0"
+arche = "4.15.0"
 ```
 
 ## Modules
@@ -855,6 +855,32 @@ let request = GenerateRequest::new(
 let response = client.generate(&request).await?;
 ```
 
+**Single calls — `one_shot`:**
+
+```rust
+use arche::llm::{one_shot, GenerateRequest};
+
+// text out
+let text = one_shot(&client, &GenerateRequest::one_shot(model, system, prompt))
+    .await?
+    .text();                       // Option<String>
+
+// typed out — the tool's parameters describe T, and the model is asked to call it
+let guess: Detection = one_shot(
+    &client,
+    &GenerateRequest::one_shot(model, system, prompt).with_tools(vec![report_tool()]),
+)
+.await?
+.parse()?;                          // first tool call's arguments
+```
+
+`GenerateRequest::one_shot` is the single-turn shape: one user message, temperature 0.
+Every option is a request builder — `with_tools`, `with_max_tokens`, `with_web_fetch`
+(lets the model fetch URLs named in the prompt; Gemini only, and combining it with
+custom tools is Gemini-3-only), `with_thinking_budget` (`0` disables Gemini thinking).
+Responses are plain `GenerateResponse`: `text()`, `tool_calls()`, `parse::<T>()`,
+`usage`, `stop_reason`.
+
 **Types you'll use:**
 
 | Type                                   | Purpose                                                                                               |
@@ -865,6 +891,7 @@ let response = client.generate(&request).await?;
 | `StreamChunk`                          | `Text(String)` \| `ToolCall { id, name, arguments }` \| `Done { finish_reason, usage }`               |
 | `ToolDefinition` + `ParameterSchema`   | Strictly-typed tool descriptions; serializes to valid JSON Schema                                     |
 | `Usage`                                | Token accounting (input/output/total)                                                                 |
+| `one_shot`                             | One call on a prepared request; returns `GenerateResponse`                                            |
 
 **Writing a custom backend:**
 
