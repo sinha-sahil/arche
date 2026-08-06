@@ -4,6 +4,7 @@ pub(crate) mod aws;
 pub(crate) mod clickhouse;
 pub(crate) mod cloudfront;
 pub(crate) mod gcp;
+pub(crate) mod kafka;
 pub(crate) mod oidc;
 pub(crate) mod pg;
 pub(crate) mod redis;

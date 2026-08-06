@@ -72,6 +72,7 @@ rsa = "0.9"
 sha2 = { version = "0.10", features = ["oid"] }
 hex = "0.4"
 percent-encoding = "2.3"
+rdkafka = "0.39"
 
 [dev-dependencies]
 cargo-husky = { version = "1", features = ["user-hooks"] }

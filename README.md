@@ -45,6 +45,7 @@ arche = "4.15.0"
 | [`llm`](#llm)           | Canonical LLM types + `LlmProvider` trait — backend-agnostic                                                                                       |
 | [`agent`](#agent)       | Tool-calling agent engine, session state, SSE streaming                                                                                            |
 | [`database`](#database) | Postgres, Redis, and ClickHouse connection pooling with health checks                                                                              |
+| [`queue`](#queue) | Kafka producer/consumer with a raw message stream, explicit offset commits, and health checks                                                    |
 | [`jwt`](#jwt)           | HS256 token generation, verification, and expiry helpers                                                                                           |
 | [`csv`](#csv)           | Async CSV read/write — batch, streaming, and from URL                                                                                              |
 | [`json`](#json)         | Streaming JSON array parsing with metadata extraction                                                                                              |
@@ -1088,6 +1089,133 @@ Notes:
 
 ---
 
+### Queue
+
+#### Kafka
+
+A thin wrapper around [`rdkafka`](https://docs.rs/rdkafka) providing a
+convenience producer, a raw parsed-message consumer stream, and a broker
+health check. Unlike a typical high-level consumer wrapper, batching and
+commit timing are not owned by arche — callers decide that policy entirely,
+for example using `tokio_stream::StreamExt::chunks_timeout`.
+
+Kafka configuration is always explicit — no field is ever resolved from
+the process environment. Configuration is split into three types:
+`KafkaConnectionConfig` (fields shared by every role: `brokers`,
+`socket_timeout_ms`, `extra_options`), `KafkaProducerConfig` (embeds
+`KafkaConnectionConfig` plus `topic`/`message_timeout_ms`), and
+`KafkaConsumerConfig` (embeds `KafkaConnectionConfig` plus
+`topics`/`group_id`/etc.) — each builder exposes the common methods
+(`.broker()`, `.socket_timeout_ms()`, `.extra_option()`, ...) directly, so
+there's no nesting required at the call site.
+
+```rust
+use arche::queue::kafka::{
+    get_kafka_producer, get_kafka_consumer, test_kafka,
+    KafkaProducerConfig, KafkaConsumerConfig, CommitMode,
+};
+use arche::tokio_stream::StreamExt;
+use std::time::Duration;
+
+// Producer and consumer configs are fully independent types.
+let producer_config = KafkaProducerConfig::builder()
+    .broker("localhost:9092")
+    .topic("orders")
+    .build();
+
+let consumer_config = KafkaConsumerConfig::builder()
+    .broker("localhost:9092")
+    .topic("orders") // or .topics(["orders", "returns"]) for multiple
+    .group_id("orders-service")
+    .build();
+
+// Producer
+let producer = get_kafka_producer(producer_config.clone()).await?;
+producer.send_json("order-123", &serde_json::json!({ "event": "order_placed" })).await?;
+
+// Consumer — caller owns batching policy; here, up to 100 messages or every 5s
+let consumer = get_kafka_consumer(consumer_config).await?;
+let mut batches = consumer.messages().chunks_timeout(100, Duration::from_secs(5));
+tokio::pin!(batches);
+while let Some(batch) = batches.next().await {
+    let mut last_ok = None;
+    let parsed: Vec<_> = batch
+        .into_iter()
+        .filter_map(|r| match r {
+            Ok(msg) => {
+                last_ok = Some(msg.clone());
+                Some((msg.key, msg.value))
+            }
+            Err(e) => {
+                tracing::warn!(?e, "skipping message");
+                None
+            }
+        })
+        .collect();
+
+    for (key, message) in &parsed {
+        println!("key={key}, message={message}");
+    }
+
+    if let Some(msg) = last_ok {
+        consumer.commit(&msg, CommitMode::Async)?;
+    }
+}
+
+// Health check — reuses the `connection` config already embedded in the
+// producer config, so there's no need to build a third config from scratch.
+let is_healthy = test_kafka(producer_config.connection).await?;
+```
+
+Notes:
+
+- `KafkaProducerConfig`/`KafkaConsumerConfig` are deliberately separate
+  types (each embedding a shared `KafkaConnectionConfig`), rather than one
+  struct with fields only some roles read — this avoids the ambiguity of a
+  producer silently needing to pick just one topic out of a list meant for
+  a consumer's subscriptions, and makes it a compile error to pass a
+  consumer's config where a producer's is expected (or vice versa).
+- `socket_timeout_ms` (default `5000`) applies to all three roles
+  (producer, consumer, and `test_kafka`) via `KafkaConnectionConfig`. Note this
+  is a **behavior change from librdkafka's own bare default of 60000ms** —
+  producer/consumer requests will now time out after 5s by default instead
+  of 60s; override via `.socket_timeout_ms(60_000)` if you need the longer
+  window.
+- Offsets are committed manually by default (`enable.auto.commit=false`,
+  `auto.offset.reset=earliest` by default) only when the caller explicitly
+  calls `commit`, giving full control over delivery semantics and an
+  at-least-once guarantee (a message is never marked done until your code
+  says so).
+- Optionally, `KafkaConsumerConfigBuilder::auto_commit(true)` re-enables
+  librdkafka's periodic background auto-commit (`auto_commit_interval_ms`
+  controls the frequency, default `5000`). **Tradeoff:** with auto-commit
+  enabled, an offset becomes eligible for commit as soon as the message is
+  handed to your code via `messages()` — not when your processing logic
+  finishes — so a crash between those two points can silently skip a
+  message on redelivery (at-most-once), unlike the default manual-commit
+  flow (at-least-once). `KafkaConsumer::commit()` remains callable
+  regardless, if you want to force an earlier commit alongside the
+  background timer.
+- `KafkaConsumer::is_rebalancing()` reports whether a partition rebalance
+  is currently in progress; this is informational only and not enforced —
+  callers may check it if they want to defer committing during
+  reassignment.
+- Null/empty keys and values are rejected on the producer side (`send_json`,
+  `send_json_to_topic`, and `send_bytes` all return `AppError::BadRequest`
+  for an empty key, a `null`/empty-string JSON value, or an empty byte
+  payload — nothing is sent to the broker). The consumer applies the same
+  rule defensively: any message with an empty key or a `null`/empty-string
+  value is skipped (logged as a warning) rather than yielded from
+  `messages()`, protecting against messages written by other, non-arche
+  producers into the same topic.
+- SASL/SSL and other librdkafka settings (e.g. `security.protocol`,
+  `sasl.mechanism`, `sasl.username`) are not exposed as dedicated config
+  fields — pass them via `.extra_option(...)` / `.extra_options([...])`
+  (available on all three builders), which map directly to librdkafka's
+  `key=value` client settings.
+
+---
+
 ### JWT
 
 Token generation and verification using HS256.
@@ -1411,7 +1539,7 @@ let params = PaginationParams { page_number: Some(1), page_size: Some(20) };
 
 arche re-exports these crates so you don't need to add them separately:
 
-`axum` · `tokio` · `serde` · `serde_json` · `sqlx` · `time` · `tracing` · `tracing-subscriber` · `reqwest` · `jsonwebtoken` · `nanoid` · `thiserror` · `base64` · `bb8` · `bb8-redis` · `clickhouse` (as `ch_client`) · `csv-async` · `futures` · `tokio-stream` · `dotenv` · `aws-config` · `aws-sdk-s3` · `aws-sdk-sesv2` · `aws-sdk-kms` · `aws-sdk-cloudfront`
+`axum` · `tokio` · `serde` · `serde_json` · `sqlx` · `time` · `tracing` · `tracing-subscriber` · `reqwest` · `jsonwebtoken` · `nanoid` · `thiserror` · `base64` · `bb8` · `bb8-redis` · `clickhouse` (as `ch_client`) · `rdkafka` · `csv-async` · `futures` · `tokio-stream` · `dotenv` · `aws-config` · `aws-sdk-s3` · `aws-sdk-sesv2` · `aws-sdk-kms` · `aws-sdk-cloudfront`
 
 ---
 
