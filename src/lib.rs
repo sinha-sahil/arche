@@ -30,6 +30,7 @@ pub use futures;
 pub use jsonwebtoken;
 pub use nanoid;
 pub use reqwest;
+pub use rsa;
 pub use serde;
 pub use serde_json;
 pub use sqlx;
