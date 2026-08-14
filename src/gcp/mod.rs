@@ -6,7 +6,6 @@ pub mod kms;
 pub mod oauth;
 pub mod sheets;
 pub(crate) mod token;
-pub mod vertex;
 
 pub use client::GcpClient;
 pub use token::ServiceAccountKey;

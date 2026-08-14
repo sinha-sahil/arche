@@ -33,7 +33,6 @@ name = "arche"
 version = "4.15.2"
 dependencies = [
  "aes",
- "async-stream",
  "aws-config",
  "aws-sdk-cloudfront",
  "aws-sdk-kms",
@@ -58,6 +57,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rsa",
+ "senno",
  "serde",
  "serde_json",
  "sha1",
@@ -3158,6 +3158,27 @@ name = "semver"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
+
+[[package]]
+name = "senno"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b287108f693c8e953bf9992f9ecd921c249f3d1be155be2c22cab5252df29d2"
+dependencies = [
+ "async-stream",
+ "axum",
+ "futures",
+ "indexmap",
+ "jsonwebtoken",
+ "nanoid",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "serde"

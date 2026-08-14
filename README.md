@@ -40,10 +40,9 @@ arche = "4.15.0"
 | Module                  | What it does                                                                                                                                       |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`aws`](#aws)           | S3, SES, KMS, and CloudFront via official AWS SDKs                                                                                                 |
-| [`gcp`](#gcp)           | Generic GCP REST client + **Vertex AI** (Gemini + Claude); wrappers for Sheets, Drive, Cloud KMS, Cloud Storage, Cloud CDN, and Google OAuth login |
+| [`gcp`](#gcp)           | Generic GCP REST client; wrappers for Sheets, Drive, Cloud KMS, Cloud Storage, Cloud CDN, and Google OAuth login                                   |
 | [`oidc`](#oidc)         | OpenID Connect both ways — _"Sign in with Google"_ client + build-your-own identity provider (authorization-code + PKCE, RS256)                    |
-| [`llm`](#llm)           | Canonical LLM types + `LlmProvider` trait — backend-agnostic                                                                                       |
-| [`agent`](#agent)       | Tool-calling agent engine, session state, SSE streaming                                                                                            |
+| [`senno`](#llm--agents-senno) | LLM client + tool-calling agents — the re-exported [senno](https://crates.io/crates/senno) crate (Vertex AI: Gemini + Claude)                |
 | [`database`](#database) | Postgres, Redis, and ClickHouse connection pooling with health checks                                                                              |
 | [`jwt`](#jwt)           | HS256 token generation, verification, and expiry helpers                                                                                           |
 | [`csv`](#csv)           | Async CSV read/write — batch, streaming, and from URL                                                                                              |
@@ -502,87 +501,9 @@ let storage = drive.with_scopes(["https://www.googleapis.com/auth/devstorage.rea
 
 #### Vertex AI
 
-`VertexClient` implements [`arche::llm::LlmProvider`](#llm) for **Gemini** and
-**Anthropic Claude** models on Google Cloud. The provider (Gemini or Anthropic) is
-captured at construction; the model is specified per-request.
-
-```rust
-use arche::gcp::vertex::{get_vertex_client, VertexConfig, VertexProvider};
-use arche::gcp::ServiceAccountKey;
-use arche::llm::{GenerateRequest, LlmProvider, Message, StreamChunk};
-
-// Gemini via API key (resolved from VERTEX_API_KEY / GEMINI_API_KEY env)
-let client = get_vertex_client(VertexProvider::Gemini, None).await?;
-
-// Service-account auth (required for Anthropic, optional for Gemini)
-let key = ServiceAccountKey::new(client_email, private_key);
-let client = get_vertex_client(
-    VertexProvider::Anthropic,
-    Some(VertexConfig::default()
-        .with_service_account_key(key)
-        .with_project_id("my-project")
-        .with_region("us-east5")),
-).await?;
-
-let request = GenerateRequest::new(
-    "gemini-2.0-flash",
-    vec![Message::user("Explain quantum computing in one sentence.")],
-)
-.with_system("You are a helpful assistant.")
-.with_max_tokens(256)
-.with_temperature(0.7);
-
-// Non-streaming
-let response = client.generate(&request).await?;
-println!("{}", response.text().unwrap_or_default());
-
-// Streaming
-use futures::StreamExt;
-let mut stream = client.stream_generate(&request).await?;
-while let Some(chunk) = stream.next().await {
-    match chunk? {
-        StreamChunk::Text(text) => print!("{text}"),
-        StreamChunk::ToolCall { name, arguments, .. } => { /* dispatch tool */ }
-        StreamChunk::Done { finish_reason, usage } => {
-            println!("\n[{finish_reason}] usage={usage:?}");
-        }
-    }
-}
-```
-
-**Function calling** (typed schemas via `arche::llm::ParameterSchema`):
-
-```rust
-use arche::llm::{ParameterSchema, ToolDefinition};
-
-let tools = vec![
-    ToolDefinition::new("get_weather", "Get current weather for a city")
-        .with_parameters(
-            ParameterSchema::object()
-                .with_property("city", ParameterSchema::string("City name"))
-                .with_required(["city"]),
-        ),
-];
-
-let request = GenerateRequest::new(
-    "gemini-2.0-flash",
-    vec![Message::user("What's the weather in Tokyo?")],
-)
-.with_tools(tools);
-```
-
-**Authentication:**
-
-| Method          | When               | Source                                                                                                             |
-| --------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| API Key         | Gemini only        | `VertexConfig::with_api_key(...)` or `VERTEX_API_KEY` / `GEMINI_API_KEY` env                                       |
-| Service Account | Gemini + Anthropic | `VertexConfig::with_service_account_key(ServiceAccountKey)` or `with_service_account_key_path("/path/to/sa.json")` |
-
-> [!NOTE]
-> If an API key is present it takes priority; **Anthropic models require
-> service-account auth**. `VERTEX_PROJECT_ID` / `VERTEX_REGION` override config
-> (default region `asia-south1`). Service-account creds must be passed via
-> `VertexConfig` — arche does **not** auto-resolve `GOOGLE_APPLICATION_CREDENTIALS`.
+Moved to [senno](https://github.com/sinha-sahil/senno) as of arche 5.0 and
+re-exported here: `arche::senno::providers::vertex` (Gemini + Anthropic Claude,
+API-key or service-account auth). See [LLM & Agents](#llm--agents-senno).
 
 **Token cache** — every GCP REST call goes through a process-local token
 cache: JWT-bearer flow against `oauth2.googleapis.com/token`, signed RS256
@@ -834,163 +755,44 @@ takes the `sub` (1–255 ASCII) and any `Serialize` claims and mints them verbat
 - [`docs/oidc/sequence.md`](docs/oidc/sequence.md) — login flow both directions, what `state` / PKCE defend, error + wire tables
 - [`docs/oidc/extending.md`](docs/oidc/extending.md) — client & server quickstarts, code for each of the five traits
 
-### LLM
+### LLM & Agents (senno)
 
-Canonical, provider-agnostic types and the `LlmProvider` trait that every backend
-implements. Use it directly when you just want to call an LLM; build on top of it
-when you want tool-calling orchestration (see [`agent`](#agent)).
+As of arche 5.0, the entire LLM stack — canonical types, the `LlmProvider`
+trait, `one_shot`, the tool-calling agent engine with history compaction, and
+the Vertex AI provider (Gemini + Anthropic Claude) — lives in its own crate:
+[**senno**](https://github.com/sinha-sahil/senno)
+([crates.io](https://crates.io/crates/senno) · [docs.rs](https://docs.rs/senno)).
 
-```rust
-use arche::llm::{GenerateRequest, LlmProvider, Message, ParameterSchema, ToolDefinition};
-
-// `client` is anything implementing `LlmProvider` —
-// VertexClient, or your own OpenAi/Bedrock/Ollama/local impl.
-let request = GenerateRequest::new(
-    "gemini-2.0-flash",
-    vec![Message::user("Hello!")],
-)
-.with_system("Be concise.")
-.with_temperature(0.3);
-
-let response = client.generate(&request).await?;
-```
-
-**Single calls — `one_shot`:**
+arche depends on senno with the `vertex` and `axum` features enabled and
+re-exports it, so no extra dependency is needed:
 
 ```rust
-use arche::llm::{one_shot, GenerateRequest};
+use arche::senno::providers::vertex::{get_vertex_client, VertexProvider};
+use arche::senno::{GenerateRequest, one_shot};
 
-// text out
-let text = one_shot(&client, &GenerateRequest::one_shot(model, system, prompt))
-    .await?
-    .text();                       // Option<String>
-
-// typed out — the tool's parameters describe T, and the model is asked to call it
-let guess: Detection = one_shot(
-    &client,
-    &GenerateRequest::one_shot(model, system, prompt).with_tools(vec![report_tool()]),
-)
-.await?
-.parse()?;                          // first tool call's arguments
-```
-
-`GenerateRequest::one_shot` is the single-turn shape: one user message, temperature 0.
-Every option is a request builder — `with_tools`, `with_max_tokens`, `with_web_fetch`
-(lets the model fetch URLs named in the prompt; Gemini only, and combining it with
-custom tools is Gemini-3-only), `with_thinking_budget` (`0` disables Gemini thinking).
-Responses are plain `GenerateResponse`: `text()`, `tool_calls()`, `parse::<T>()`,
-`usage`, `stop_reason`.
-
-**Types you'll use:**
-
-| Type                                   | Purpose                                                                                               |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `LlmProvider` (trait)                  | `generate()` + `stream_generate()` on a canonical `GenerateRequest`. Implement this to add a backend. |
-| `GenerateRequest` / `GenerateResponse` | Canonical request/response, provider-neutral                                                          |
-| `Message`, `Role`, `ContentPart`       | Conversation turns — text, tool calls, tool results                                                   |
-| `StreamChunk`                          | `Text(String)` \| `ToolCall { id, name, arguments }` \| `Done { finish_reason, usage }`               |
-| `ToolDefinition` + `ParameterSchema`   | Strictly-typed tool descriptions; serializes to valid JSON Schema                                     |
-| `Usage`                                | Token accounting (input/output/total)                                                                 |
-| `one_shot`                             | One call on a prepared request; returns `GenerateResponse`                                            |
-
-**Writing a custom backend:**
-
-```rust
-use arche::llm::{GenerateRequest, GenerateResponse, LlmProvider, LlmStream};
-use arche::error::AppError;
-use std::future::Future;
-use std::pin::Pin;
-
-pub struct OpenAiClient { /* http client, api key */ }
-
-impl LlmProvider for OpenAiClient {
-    fn generate<'a>(&'a self, request: &'a GenerateRequest)
-        -> Pin<Box<dyn Future<Output = Result<GenerateResponse, AppError>> + Send + 'a>>
-    { Box::pin(async move { /* POST, convert */ todo!() }) }
-
-    fn stream_generate<'a>(&'a self, request: &'a GenerateRequest)
-        -> Pin<Box<dyn Future<Output = Result<LlmStream, AppError>> + Send + 'a>>
-    { Box::pin(async move { /* POST stream, convert SSE */ todo!() }) }
-}
-```
-
-Drops into `arche::agent::get_agent_engine(my_client, config)` with no other changes.
-
----
-
-### Agent
-
-Tool-calling agent engine: orchestrates LLM rounds, invokes your tools, streams SSE
-events to the client, manages session history (with optional compaction).
-
-```rust
-use arche::agent::{get_agent_engine, AgentConfig, AgentFlow, AgentSession, ToolOutput, to_sse_event};
-use arche::gcp::vertex::{get_vertex_client, VertexProvider};
-use arche::llm::{ParameterSchema, ToolDefinition};
-
-struct ShoppingFlow;
-
-impl AgentFlow for ShoppingFlow {
-    fn system_prompt(&self) -> String {
-        "You help shoppers find products.".into()
-    }
-
-    fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        vec![
-            ToolDefinition::new("search_catalog", "Search products by query")
-                .with_parameters(
-                    ParameterSchema::object()
-                        .with_property("query", ParameterSchema::string("Query"))
-                        .with_required(["query"]),
-                ),
-        ]
-    }
-
-    fn execute_tool<'a>(
-        &'a self,
-        name: &'a str,
-        args: &'a serde_json::Value,
-        _session: &'a AgentSession,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolOutput, arche::error::AppError>> + Send + 'a>> {
-        Box::pin(async move {
-            // Run your business logic, return text for the LLM + optional data for the client
-            Ok(ToolOutput::text("Found 3 matches")
-                .data("product_list", serde_json::json!([/* ... */])))
-        })
-    }
-}
-
-// Wire it up
 let client = get_vertex_client(VertexProvider::Gemini, None).await?;
-let config = AgentConfig::builder("gemini-2.0-flash").build()?;
-let engine = get_agent_engine(client, config)
-    .with_default_summarizer("gemini-2.0-flash-lite"); // optional, cheap summarization
-
-// Per request
-let mut session = AgentSession::new("sess-1", "shopping");
-let stream = engine.run(&ShoppingFlow, &mut session, "find red shoes");
-// Map each SseEvent via `to_sse_event(..)` to an axum SSE Event.
+let resp = one_shot(
+    &client,
+    &GenerateRequest::one_shot("gemini-2.5-flash", "Be concise.", "Hello!"),
+)
+.await?;
 ```
 
-**What arche provides vs. what you write:**
+**Error bridging** — senno returns its own `senno::Error`; arche provides
+`impl From<senno::Error> for AppError`, so `?` works unchanged in handlers:
+provider failures map to `DependencyFailed` (retryability preserved),
+config/tool failures map to `InternalError`.
 
-| Arche provides                                                                                          | You write                                                                                         |
-| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Orchestration loop, streaming, SSE event types, session mutation, tool-calling loop, history compaction | System prompt, tool schemas, tool executors (`impl AgentFlow`), HTTP handler, session persistence |
+**Migrating from arche 4.x:**
 
-**Extension points:**
+| arche 4.x                   | arche 5.0                              |
+| --------------------------- | -------------------------------------- |
+| `arche::llm::*`             | `arche::senno::*`                      |
+| `arche::agent::*`           | `arche::senno::agent::*`               |
+| `arche::gcp::vertex::*`     | `arche::senno::providers::vertex::*`   |
+| tool errors as `AppError`   | tool errors as `senno::Error`          |
 
-| Need                                                          | Plug point                                                                       |
-| ------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Different LLM backend                                         | `impl LlmProvider for YourClient`                                                |
-| Custom history compaction (vector recall, server-side memory) | `impl HistoryCompactor`                                                          |
-| Custom UI events from tools                                   | `ToolOutput::text(..).data(type, payload)` → reaches client via `SseEvent::Data` |
-
-**Deeper reading:**
-
-- [`docs/agent/architecture.md`](docs/agent/architecture.md) — module layering, component diagram with hover tooltips
-- [`docs/agent/sequence.md`](docs/agent/sequence.md) — request lifecycle, error paths, SSE wire format
-- [`docs/agent/extending.md`](docs/agent/extending.md) — step-by-step guides for each plug point
+Full documentation lives in the senno repo (README + `docs/agent/`).
 
 ---
 

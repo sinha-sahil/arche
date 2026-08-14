@@ -279,3 +279,80 @@ struct InternalErrorDetails {
     error: String,
     message: Option<String>,
 }
+
+/// Bridge for the extracted LLM stack: `?` works on `senno::Error` inside
+/// handlers returning `AppError`.
+impl From<senno::Error> for AppError {
+    fn from(e: senno::Error) -> Self {
+        match e {
+            senno::Error::Provider {
+                provider,
+                detail,
+                retryable,
+            } => Self::DependencyFailed {
+                upstream: provider,
+                detail,
+                retryable,
+            },
+            senno::Error::BadResponse(detail) => Self::DependencyFailed {
+                upstream: "llm".into(),
+                detail,
+                retryable: true,
+            },
+            senno::Error::Config(error) => Self::InternalError {
+                error,
+                message: None,
+            },
+            senno::Error::Tool { name, detail } => Self::InternalError {
+                error: format!("tool {name}: {detail}"),
+                message: None,
+            },
+            senno::Error::Internal(error) => Self::InternalError {
+                error,
+                message: None,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn senno_provider_error_maps_to_dependency_failed_preserving_retryability() {
+        let e: AppError = senno::Error::provider("vertex-ai", "boom").into();
+        assert!(matches!(
+            e,
+            AppError::DependencyFailed { ref upstream, retryable: true, .. } if upstream == "vertex-ai"
+        ));
+
+        let e: AppError = senno::Error::provider_permanent("gcp-oauth2", "denied").into();
+        assert!(matches!(
+            e,
+            AppError::DependencyFailed {
+                retryable: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn senno_bad_response_maps_to_retryable_llm_dependency_failure() {
+        let e: AppError = senno::Error::bad_response("no tool call").into();
+        assert!(e.is_dependency_error());
+        assert_eq!(e.detailed_error_message(), "no tool call");
+    }
+
+    #[test]
+    fn senno_config_and_tool_errors_map_to_internal() {
+        let e: AppError = senno::Error::config("missing key").into();
+        assert!(matches!(e, AppError::InternalError { .. }));
+
+        let e: AppError = senno::Error::tool("search", "db down").into();
+        assert!(matches!(
+            e,
+            AppError::InternalError { ref error, .. } if error == "tool search: db down"
+        ));
+    }
+}
