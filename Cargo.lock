@@ -30,7 +30,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "arche"
-version = "4.16.1"
+version = "4.16.2"
 dependencies = [
  "aes",
  "aws-config",
