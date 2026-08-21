@@ -3332,9 +3332,9 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "senno"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bdc05bc511fb70685ea34b10fc9835754d3c82ffdb4dc0ffebacbd53b8408af"
+checksum = "ad41bb8575b86b8d9acb84be8cbee0adde45e55787259e08362bdb7f0c7fc65c"
 dependencies = [
  "async-stream",
  "axum",
