@@ -5,8 +5,8 @@ use std::time::Duration;
 use rdkafka::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext, Rebalance, StreamConsumer};
-use rdkafka::message::{Message, OwnedMessage};
-use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::message::{Header, Message, OwnedHeaders, OwnedMessage};
+use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
 use tokio_stream::{Stream, StreamExt};
 
@@ -148,44 +148,6 @@ fn lock_error() -> AppError {
     )
 }
 
-fn validate_key(key: &str) -> Result<(), AppError> {
-    if key.is_empty() {
-        return Err(AppError::bad_request(
-            None,
-            Some("Kafka message key must not be empty".to_string()),
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn is_empty_json_value(value: &serde_json::Value) -> bool {
-    matches!(value, serde_json::Value::Null)
-        || matches!(value, serde_json::Value::String(s) if s.is_empty())
-}
-
-fn validate_value(value: &serde_json::Value) -> Result<(), AppError> {
-    if is_empty_json_value(value) {
-        return Err(AppError::bad_request(
-            None,
-            Some("Kafka message value must not be null or an empty string".to_string()),
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn validate_payload(payload: &[u8]) -> Result<(), AppError> {
-    if payload.is_empty() {
-        return Err(AppError::bad_request(
-            None,
-            Some("Kafka message payload must not be empty".to_string()),
-            None,
-        ));
-    }
-    Ok(())
-}
-
 fn require_non_empty_list(list: Option<Vec<String>>, field: &str) -> Result<Vec<String>, AppError> {
     let list = list
         .filter(|l| !l.is_empty())
@@ -209,6 +171,13 @@ fn socket_timeout_ms(connection: &KafkaConnectionConfig) -> u64 {
 }
 
 pub fn build_client_config(connection: &KafkaConnectionConfig) -> Result<ClientConfig, AppError> {
+    client_config_with_defaults(connection, &[])
+}
+
+fn client_config_with_defaults(
+    connection: &KafkaConnectionConfig,
+    role_defaults: &[(&str, String)],
+) -> Result<ClientConfig, AppError> {
     let brokers = require_non_empty_list(connection.brokers.clone(), "brokers")?;
 
     let mut client_config = ClientConfig::new();
@@ -256,6 +225,10 @@ pub fn build_client_config(connection: &KafkaConnectionConfig) -> Result<ClientC
         client_config.set("ssl.key.password", password);
     }
 
+    for (key, value) in role_defaults {
+        client_config.set(*key, value);
+    }
+
     for (key, value) in connection.extra_options.iter().flatten() {
         client_config.set(key, value);
     }
@@ -284,18 +257,100 @@ pub struct KafkaProducer {
     topic: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryReport {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OutboundMessage {
+    pub topic: Option<String>,
+    pub key: Option<String>,
+    pub payload: Option<Vec<u8>>,
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub timestamp_ms: Option<i64>,
+    pub partition: Option<i32>,
+}
+
+impl OutboundMessage {
+    pub fn new(payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            payload: Some(payload.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn tombstone() -> Self {
+        Self::default()
+    }
+
+    pub fn json(value: &serde_json::Value) -> Result<Self, AppError> {
+        let payload = serde_json::to_vec(value).map_err(|e| {
+            AppError::internal_error(format!("Failed to serialize JSON payload: {e}"), None)
+        })?;
+        Ok(Self::new(payload))
+    }
+
+    pub fn topic(mut self, topic: impl Into<String>) -> Self {
+        self.topic = Some(topic.into());
+        self
+    }
+
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    pub fn header(mut self, key: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
+        self.headers.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn headers<I, K, V>(mut self, headers: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<Vec<u8>>,
+    {
+        self.headers
+            .extend(headers.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
+    }
+
+    pub fn timestamp_ms(mut self, timestamp_ms: i64) -> Self {
+        self.timestamp_ms = Some(timestamp_ms);
+        self
+    }
+
+    pub fn partition(mut self, partition: i32) -> Self {
+        self.partition = Some(partition);
+        self
+    }
+}
+
+fn producer_client_config(config: &KafkaProducerConfig) -> Result<ClientConfig, AppError> {
+    let message_timeout_ms = config
+        .message_timeout_ms
+        .unwrap_or(DEFAULT_MESSAGE_TIMEOUT_MS);
+
+    client_config_with_defaults(
+        &config.connection,
+        &[
+            ("message.timeout.ms", message_timeout_ms.to_string()),
+            ("enable.idempotence", "true".to_string()),
+        ],
+    )
+}
+
 pub async fn get_kafka_producer(
     config: impl Into<Option<KafkaProducerConfig>>,
 ) -> Result<KafkaProducer, AppError> {
     let config = config.into().unwrap_or_default();
 
+    let client_config = producer_client_config(&config)?;
     let topic = require_non_empty_string(config.topic, "topic")?;
-    let message_timeout_ms = config
-        .message_timeout_ms
-        .unwrap_or(DEFAULT_MESSAGE_TIMEOUT_MS);
-
-    let mut client_config = build_client_config(&config.connection)?;
-    client_config.set("message.timeout.ms", message_timeout_ms.to_string());
 
     let producer: FutureProducer = client_config
         .create()
@@ -307,59 +362,80 @@ pub async fn get_kafka_producer(
 }
 
 impl KafkaProducer {
-    pub async fn send_json(&self, key: &str, value: &serde_json::Value) -> Result<(), AppError> {
-        self.send_json_to_topic(&self.topic, key, value).await
+    pub async fn send(&self, message: OutboundMessage) -> Result<DeliveryReport, AppError> {
+        let topic = message.topic.as_deref().unwrap_or(&self.topic);
+        if topic.is_empty() {
+            return Err(config_error("message.topic", "must not be empty"));
+        }
+
+        let mut headers = OwnedHeaders::new_with_capacity(message.headers.len());
+        for (key, value) in &message.headers {
+            headers = headers.insert(Header {
+                key,
+                value: Some(value.as_slice()),
+            });
+        }
+
+        let mut record = FutureRecord::<String, Vec<u8>>::to(topic).headers(headers);
+        if let Some(key) = &message.key {
+            record = record.key(key);
+        }
+        if let Some(payload) = &message.payload {
+            record = record.payload(payload);
+        }
+        if let Some(timestamp_ms) = message.timestamp_ms {
+            record = record.timestamp(timestamp_ms);
+        }
+        if let Some(partition) = message.partition {
+            record = record.partition(partition);
+        }
+
+        self.dispatch(record, "send").await
     }
 
-    pub async fn send_json_to_topic(
+    pub async fn send_all(
         &self,
-        topic: &str,
-        key: &str,
-        value: &serde_json::Value,
-    ) -> Result<(), AppError> {
-        validate_key(key)?;
-        validate_value(value)?;
-
-        let payload = serde_json::to_vec(value).map_err(|e| {
-            AppError::internal_error(format!("Failed to serialize JSON payload: {e}"), None)
-        })?;
-
-        self.send_record(topic, key, &payload, "send_json_to_topic")
-            .await
+        messages: Vec<OutboundMessage>,
+    ) -> Vec<Result<DeliveryReport, AppError>> {
+        futures::future::join_all(messages.into_iter().map(|m| self.send(m))).await
     }
 
-    pub async fn send_bytes(&self, key: &str, payload: &[u8]) -> Result<(), AppError> {
-        validate_key(key)?;
-        validate_payload(payload)?;
-        self.send_record(&self.topic, key, payload, "send_bytes")
-            .await
-    }
-
-    pub async fn send_bytes_to_topic(
-        &self,
-        topic: &str,
-        key: &str,
-        payload: &[u8],
-    ) -> Result<(), AppError> {
-        validate_key(key)?;
-        validate_payload(payload)?;
-        self.send_record(topic, key, payload, "send_bytes_to_topic")
-            .await
-    }
-
-    async fn send_record(
-        &self,
-        topic: &str,
-        key: &str,
-        payload: &[u8],
-        op: &'static str,
-    ) -> Result<(), AppError> {
-        let record = FutureRecord::to(topic).key(key).payload(payload);
+    pub async fn flush(&self, timeout: Duration) -> Result<(), AppError> {
         self.producer
-            .send(record, Duration::from_secs(0))
-            .await
+            .flush(timeout)
+            .map_err(|e| dependency_error("flush", e))
+    }
+
+    pub fn in_flight(&self) -> i32 {
+        self.producer.in_flight_count()
+    }
+
+    async fn dispatch<K, P>(
+        &self,
+        record: FutureRecord<'_, K, P>,
+        op: &'static str,
+    ) -> Result<DeliveryReport, AppError>
+    where
+        K: rdkafka::message::ToBytes + ?Sized,
+        P: rdkafka::message::ToBytes + ?Sized,
+    {
+        let topic = record.topic.to_string();
+        let delivery = self
+            .producer
+            .send_result(record)
             .map_err(|(e, _)| dependency_error(op, e))?;
-        Ok(())
+        match delivery.await {
+            Ok(Ok(delivery)) => Ok(DeliveryReport {
+                topic,
+                partition: delivery.partition,
+                offset: delivery.offset,
+            }),
+            Ok(Err((e, _))) => Err(dependency_error(op, e)),
+            Err(_) => Err(AppError::internal_error(
+                format!("{op}: delivery future canceled"),
+                None,
+            )),
+        }
     }
 }
 
@@ -429,6 +505,10 @@ impl KafkaRawMessage {
         self.raw.offset()
     }
 
+    pub fn headers(&self) -> Option<&OwnedHeaders> {
+        self.raw.headers()
+    }
+
     pub fn into_inner(self) -> OwnedMessage {
         self.raw
     }
@@ -482,13 +562,10 @@ pub struct KafkaConsumer {
     partition_reassignment_in_progress: Arc<RwLock<bool>>,
 }
 
-pub async fn get_kafka_consumer(
-    config: impl Into<Option<KafkaConsumerConfig>>,
-) -> Result<KafkaConsumer, AppError> {
-    let config = config.into().unwrap_or_default();
-
-    let topics = require_non_empty_list(config.topics, "topics")?;
-    let group_id = require_non_empty_string(config.group_id, "group_id")?;
+fn consumer_client_config(
+    config: &KafkaConsumerConfig,
+    group_id: &str,
+) -> Result<ClientConfig, AppError> {
     let session_timeout_ms = config
         .session_timeout_ms
         .unwrap_or(DEFAULT_SESSION_TIMEOUT_MS);
@@ -498,21 +575,38 @@ pub async fn get_kafka_consumer(
         .auto_commit_interval_ms
         .unwrap_or(DEFAULT_AUTO_COMMIT_INTERVAL_MS);
 
+    client_config_with_defaults(
+        &config.connection,
+        &[
+            ("group.id", group_id.to_string()),
+            ("enable.auto.commit", auto_commit.to_string()),
+            (
+                "auto.commit.interval.ms",
+                auto_commit_interval_ms.to_string(),
+            ),
+            (
+                "auto.offset.reset",
+                auto_offset_reset.as_librdkafka_str().to_string(),
+            ),
+            ("session.timeout.ms", session_timeout_ms.to_string()),
+        ],
+    )
+}
+
+pub async fn get_kafka_consumer(
+    config: impl Into<Option<KafkaConsumerConfig>>,
+) -> Result<KafkaConsumer, AppError> {
+    let config = config.into().unwrap_or_default();
+
+    let topics = require_non_empty_list(config.topics.clone(), "topics")?;
+    let group_id = require_non_empty_string(config.group_id.clone(), "group_id")?;
+
+    let client_config = consumer_client_config(&config, &group_id)?;
+
     let partition_reassignment_in_progress = Arc::new(RwLock::new(false));
     let context = KafkaConsumerContext {
         partition_reassignment_in_progress: partition_reassignment_in_progress.clone(),
     };
-
-    let mut client_config = build_client_config(&config.connection)?;
-    client_config
-        .set("group.id", &group_id)
-        .set("enable.auto.commit", auto_commit.to_string())
-        .set(
-            "auto.commit.interval.ms",
-            auto_commit_interval_ms.to_string(),
-        )
-        .set("auto.offset.reset", auto_offset_reset.as_librdkafka_str())
-        .set("session.timeout.ms", session_timeout_ms.to_string());
 
     let consumer: StreamConsumer<KafkaConsumerContext> = client_config
         .create_with_context(context)
@@ -682,17 +776,6 @@ mod tests {
     }
 
     #[test]
-    fn payload_validators() {
-        assert!(validate_key("").is_err());
-        assert!(validate_key("k").is_ok());
-        assert!(validate_value(&serde_json::Value::Null).is_err());
-        assert!(validate_value(&serde_json::json!("")).is_err());
-        assert!(validate_value(&serde_json::json!({"a": 1})).is_ok());
-        assert!(validate_payload(b"").is_err());
-        assert!(validate_payload(b"x").is_ok());
-    }
-
-    #[test]
     fn client_config_sets_defaults_and_security_fields() {
         let connection = KafkaConnectionConfig::builder()
             .brokers(["a:9092", "b:9092"])
@@ -773,6 +856,89 @@ mod tests {
         let config = build_client_config(&connection).expect("valid config");
         assert_eq!(config.get("socket.timeout.ms"), Some("9000"));
         assert_eq!(config.get("client.id"), Some("svc"));
+    }
+
+    #[test]
+    fn role_defaults_sit_between_typed_fields_and_extra_options() {
+        let connection = KafkaConnectionConfig::builder()
+            .broker("a:9092")
+            .extra_option("enable.idempotence", "false")
+            .build();
+        let config = client_config_with_defaults(
+            &connection,
+            &[
+                ("enable.idempotence", "true".to_string()),
+                ("acks", "all".to_string()),
+            ],
+        )
+        .expect("valid config");
+        assert_eq!(config.get("acks"), Some("all")); // default kept
+        assert_eq!(config.get("enable.idempotence"), Some("false")); // user override wins
+    }
+
+    #[test]
+    fn outbound_message_builder() {
+        let message = OutboundMessage::json(&serde_json::json!({"a": 1}))
+            .expect("serializable")
+            .topic("orders")
+            .key("k1")
+            .header("trace-id", "abc")
+            .headers([("h2", vec![1u8, 2])])
+            .timestamp_ms(1_700_000_000_000)
+            .partition(2);
+        assert_eq!(message.topic.as_deref(), Some("orders"));
+        assert_eq!(message.key.as_deref(), Some("k1"));
+        assert_eq!(message.payload.as_deref(), Some(br#"{"a":1}"#.as_slice()));
+        assert_eq!(message.headers.len(), 2);
+        assert_eq!(message.timestamp_ms, Some(1_700_000_000_000));
+        assert_eq!(message.partition, Some(2));
+
+        let tombstone = OutboundMessage::tombstone().key("k1");
+        assert!(tombstone.payload.is_none());
+        assert!(tombstone.topic.is_none()); // falls back to the producer's topic
+    }
+
+    #[test]
+    fn producer_defaults_are_overridable_by_extra_options() {
+        let config = KafkaProducerConfig::builder()
+            .broker("a:9092")
+            .topic("orders")
+            .build();
+        let defaults = producer_client_config(&config).expect("valid config");
+        assert_eq!(defaults.get("enable.idempotence"), Some("true"));
+        assert_eq!(defaults.get("message.timeout.ms"), Some("5000"));
+
+        let overridden = KafkaProducerConfig::builder()
+            .broker("a:9092")
+            .topic("orders")
+            .extra_options_from_str("enable.idempotence=false,message.timeout.ms=60000")
+            .build();
+        let overridden = producer_client_config(&overridden).expect("valid config");
+        assert_eq!(overridden.get("enable.idempotence"), Some("false"));
+        assert_eq!(overridden.get("message.timeout.ms"), Some("60000"));
+    }
+
+    #[test]
+    fn consumer_defaults_are_overridable_by_extra_options() {
+        let config = KafkaConsumerConfig::builder()
+            .broker("a:9092")
+            .topic("orders")
+            .group_id("svc")
+            .build();
+        let defaults = consumer_client_config(&config, "svc").expect("valid config");
+        assert_eq!(defaults.get("enable.auto.commit"), Some("false"));
+        assert_eq!(defaults.get("auto.offset.reset"), Some("earliest"));
+        assert_eq!(defaults.get("session.timeout.ms"), Some("30000"));
+
+        let overridden = KafkaConsumerConfig::builder()
+            .broker("a:9092")
+            .topic("orders")
+            .group_id("svc")
+            .extra_options_from_str("enable.auto.commit=true,session.timeout.ms=45000")
+            .build();
+        let overridden = consumer_client_config(&overridden, "svc").expect("valid config");
+        assert_eq!(overridden.get("enable.auto.commit"), Some("true"));
+        assert_eq!(overridden.get("session.timeout.ms"), Some("45000"));
     }
 
     #[test]

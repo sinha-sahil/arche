@@ -44,7 +44,7 @@ arche = "4.15.0"
 | [`oidc`](#oidc)         | OpenID Connect both ways — _"Sign in with Google"_ client + build-your-own identity provider (authorization-code + PKCE, RS256)                    |
 | [`senno`](#llm--agents-senno) | LLM client + tool-calling agents — the re-exported [senno](https://crates.io/crates/senno) crate (Vertex AI: Gemini + Claude)                |
 | [`database`](#database) | Postgres, Redis, and ClickHouse connection pooling with health checks                                                                              |
-| [`queue`](#queue) | Kafka producer/consumer with a raw message stream, explicit offset commits, and health checks                                                    |
+| [`queue`](#queue) | Kafka producer (headers, timestamps, delivery reports, batching) and consumer stream with explicit offset commits and health checks |
 | [`jwt`](#jwt)           | HS256 token generation, verification, and expiry helpers                                                                                           |
 | [`csv`](#csv)           | Async CSV read/write — batch, streaming, and from URL                                                                                              |
 | [`json`](#json)         | Streaming JSON array parsing with metadata extraction                                                                                              |
@@ -895,7 +895,7 @@ Notes:
 
 #### Kafka
 
-Enabled with the `kafka` cargo feature (`arche = { version = "...", features = ["kafka"] }`),
+Enabled with the `queue` cargo feature (`arche = { version = "...", features = ["queue"] }`),
 since it compiles librdkafka and OpenSSL from source and most services don't
 need it. A thin wrapper around [`rdkafka`](https://docs.rs/rdkafka) providing a
 convenience producer, a JSON-decoded consumer stream (plus a raw-bytes
@@ -914,14 +914,14 @@ settings, `extra_options`), `KafkaProducerConfig` (embeds
 `topics`/`group_id`/etc.). Build the connection once and hand it to each
 role builder via `.connection(..)` (call it first — it replaces the embedded
 connection); the role builders also expose `.broker()`, `.brokers()`,
-`.socket_timeout_ms()` and `.extra_option(s)()` directly for the simple
-plaintext case.
+`.socket_timeout_ms()`, `.extra_option(s)()` and
+`.extra_options_from_str()` directly for the simple plaintext case.
 
 ```rust
 use arche::queue::kafka::{
     get_kafka_producer, get_kafka_consumer, test_kafka,
     KafkaConnectionConfig, KafkaProducerConfig, KafkaConsumerConfig,
-    SecurityProtocol, SaslMechanism, CommitMode, KafkaConsumeError,
+    SecurityProtocol, SaslMechanism, CommitMode, KafkaConsumeError, OutboundMessage,
 };
 use arche::tokio_stream::StreamExt;
 use std::time::Duration;
@@ -952,9 +952,22 @@ let consumer_config = KafkaConsumerConfig::builder()
 // Health check — same connection config, so SSL/SASL is honoured here too.
 let is_healthy = test_kafka(connection).await?;
 
-// Producer
+// Producer — one produce API: headers, explicit timestamp/partition,
+// tombstones (payload: None) and a delivery report back.
 let producer = get_kafka_producer(producer_config).await?;
-producer.send_json("order-123", &serde_json::json!({ "event": "order_placed" })).await?;
+let report = producer
+    .send(
+        OutboundMessage::json(&serde_json::json!({ "event": "order_placed" }))?
+            .key("order-123")
+            .header("trace-id", "abc")
+            .timestamp_ms(1_700_000_000_000),
+    )
+    .await?;
+println!("landed at {}[{}]@{}", report.topic, report.partition, report.offset);
+
+// Batch: everything is enqueued first, so librdkafka packs the set into few requests.
+let reports = producer.send_all(batch_of_outbound_messages).await;
+producer.flush(Duration::from_secs(5)).await?; // before shutdown
 
 // Consumer — caller owns batching policy; here, up to 100 messages or every 5s
 let consumer = get_kafka_consumer(consumer_config).await?;
@@ -1007,9 +1020,34 @@ Notes:
   `/etc/ssl/cert.pem`, ...) — make sure the runtime image has
   `ca-certificates` installed (distroless/scratch images don't), or point
   `ssl_ca_location` at a bundle/private CA explicitly.
-- Any other librdkafka setting (`client.id`, `compression.type`, ...) can be
-  passed via `.extra_option(...)` / `.extra_options([...])`. They are
-  applied last, so they override the typed fields if both are set.
+- **Any librdkafka option is a passthrough.** Typed fields exist only where
+  arche validates the value (brokers, security) or its own behaviour depends
+  on it. Everything else — `acks`, `compression.type`, `linger.ms`,
+  `max.poll.interval.ms`, `group.instance.id`, `partition.assignment.strategy`,
+  … — goes through `.extra_option(k, v)`, `.extra_options(map)`, or
+  `.extra_options_from_str("k=v,k=v")` (straight from an env var) and is
+  forwarded to librdkafka verbatim. Order is the contract: typed fields →
+  arche's defaults → your options **last**, so you can override anything.
+  This holds identically for the producer, the consumer and `test_kafka`.
+- **Producer defaults** (overridable): `enable.idempotence=true` — the broker
+  de-duplicates librdkafka's own retransmissions using sequence numbers. It
+  never drops anything your code sent; two `send()` calls with the same key
+  and payload are two messages. `acks` stays at librdkafka's default (`all`).
+- **`OutboundMessage`** is the full-control produce request: optional
+  `topic` (falls back to the producer's), optional `key` (forwarded as-is —
+  how empty/null keys partition is decided by librdkafka's `partitioner`),
+  `payload: Option<Vec<u8>>` (`None` = tombstone), headers, optional
+  `timestamp_ms` and `partition`. A null key (`None`) and an empty key
+  (`Some("")`) are both forwarded untouched — how they partition is decided
+  by librdkafka's `partitioner`: the default `consistent_random` spreads both
+  randomly, while `consistent`/`murmur2`/`fnv1a` concentrate them on one
+  partition. `send()` returns a `DeliveryReport`
+  (`topic`, `partition`, `offset`); `send_all()` enqueues everything before
+  awaiting so batches are cheap; `flush(timeout)` drains the local queue
+  before shutdown; internally everything uses `send_result` (one enqueue
+  attempt — a full local queue is a retryable `DependencyFailed`, never a
+  blocking spin). The key is forwarded as given and the payload is opaque —
+  arche never inspects either.
 - Missing/empty required config (`brokers`, `topic`, `topics`, `group_id`,
   SASL fields) returns `AppError::InternalError` with a
   `Config error [kafka/<field>]: ...` message, consistent with the other
@@ -1041,10 +1079,6 @@ Notes:
   is currently in progress; this is informational only and not enforced —
   callers may check it if they want to defer committing during
   reassignment.
-- Empty keys and null/empty values are rejected on the producer side
-  (`send_json`, `send_json_to_topic`, `send_bytes`, and `send_bytes_to_topic`
-  return `AppError::BadRequest` for an empty key, a `null`/empty-string JSON
-  value, or an empty byte payload — nothing is sent to the broker).
 - **The consumer never drops messages.** `messages()` yields every message
   from the subscription: successfully decoded ones as `KafkaMessage`
   (`key: Option<String>` — `None` for Kafka null keys; `value` — a null
@@ -1057,8 +1091,8 @@ Notes:
 - **Raw messages.** `KafkaConsumer::raw_messages()` yields every message
   untouched as `KafkaRawMessage` (`key()`/`payload()` as `Option<&[u8]>`,
   plus `topic()`/`partition()`/`offset()` and `into_inner()` for the
-  underlying `rdkafka` message). Use it for Avro/protobuf/bytes topics or
-  with `send_bytes`, and commit with `commit_raw(&msg, mode)`.
+  underlying `rdkafka` message). Use it for Avro/protobuf/bytes topics, and
+  commit with `commit_raw(&msg, mode)`.
 
 ---
 

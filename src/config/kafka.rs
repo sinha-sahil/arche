@@ -124,6 +124,20 @@ impl KafkaConnectionConfigBuilder {
         self
     }
 
+    pub fn extra_options_from_str(mut self, options: &str) -> Self {
+        let map = self.extra_options.get_or_insert_with(HashMap::new);
+        for pair in options.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            if let Some((key, value)) = pair.split_once('=') {
+                map.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+        self
+    }
+
     pub fn build(self) -> KafkaConnectionConfig {
         KafkaConnectionConfig {
             brokers: self.brokers,
@@ -219,6 +233,11 @@ impl KafkaProducerConfigBuilder {
         self
     }
 
+    pub fn extra_options_from_str(mut self, options: &str) -> Self {
+        self.connection = self.connection.extra_options_from_str(options);
+        self
+    }
+
     pub fn topic(mut self, topic: impl Into<String>) -> Self {
         self.topic = Some(topic.into());
         self
@@ -306,6 +325,11 @@ impl KafkaConsumerConfigBuilder {
         self
     }
 
+    pub fn extra_options_from_str(mut self, options: &str) -> Self {
+        self.connection = self.connection.extra_options_from_str(options);
+        self
+    }
+
     pub fn topic(mut self, topic: impl Into<String>) -> Self {
         let topic = topic.into();
         match self.topics.as_mut() {
@@ -382,6 +406,19 @@ mod tests {
         let extra = config.extra_options.unwrap_or_default();
         assert_eq!(extra.get("k1").map(String::as_str), Some("v1"));
         assert_eq!(extra.get("k2").map(String::as_str), Some("v2"));
+    }
+
+    #[test]
+    fn extra_options_from_str_parses_env_style_pairs() {
+        let config = KafkaConnectionConfig::builder()
+            .extra_option("client.id", "old")
+            .extra_options_from_str(" client.id=svc , linger.ms=20,,broken, sasl.password=a=b ")
+            .build();
+        let extra = config.extra_options.unwrap_or_default();
+        assert_eq!(extra.get("client.id").map(String::as_str), Some("svc"));
+        assert_eq!(extra.get("linger.ms").map(String::as_str), Some("20"));
+        assert_eq!(extra.get("sasl.password").map(String::as_str), Some("a=b"));
+        assert_eq!(extra.len(), 3);
     }
 
     #[test]
