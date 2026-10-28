@@ -1,6 +1,6 @@
 [package]
 name = "arche"
-version = "4.17.3"
+version = "4.17.4"
 edition = "2024"
 description = "An opinionated backend foundation for Axum applications, providing batteries-included integrations for cloud services, databases, authentication, middleware, and logging."
 authors = ["Sahil Sinha"]
