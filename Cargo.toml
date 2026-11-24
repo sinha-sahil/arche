@@ -22,6 +22,8 @@ exclude = [".gitignore", ".vscode/*"]
 default = []
 verbose-errors = []
 queue = ["dep:rdkafka"]
+service = []
+architecture = ["dep:syn", "dep:cargo_metadata", "dep:toml"]
 
 [dependencies]
 aws-config = "1.8.12"
@@ -74,6 +76,9 @@ sha2 = { version = "0.10", features = ["oid"] }
 hex = "0.4"
 percent-encoding = "2.3"
 rdkafka = { version = "0.39", features = ["ssl-vendored", "zstd"], optional = true }
+syn = { version = "3.0.10", features = ["full"], optional = true }
+cargo_metadata = { version = "0.23.1", optional = true }
+toml = { version = "1.2.2", optional = true }
 
 [dev-dependencies]
 cargo-husky = { version = "1", features = ["user-hooks"] }

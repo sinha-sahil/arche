@@ -53,6 +53,8 @@ arche = "4.15.0"
 | [`error`](#error)       | Axum-compatible structured error responses (400–503)                                                                                               |
 | [`middleware`](#middleware) | Axum layers — rewrites extractor rejections into `AppError` JSON so clients see one error contract                                             |
 | [`utils`](#utils)       | Alphanumeric nano IDs, timestamp validation, date/time conversions, pagination                                                                     |
+| [`service`](#service)   | `Service` trait and `Routes` builder: one binary made of many service crates, each with its own state (feature `service`)                          |
+| [`architecture`](#architecture) | Architecture rules as `#[test]`s: crate roles, public-surface and workspace-lint checks, shrink-only allowlists (feature `architecture`) |
 
 > [!TIP]
 > Every service module exports a **config builder** to wire up credentials
@@ -1296,6 +1298,16 @@ async fn handler() -> Result<impl axum::response::IntoResponse, AppError> {
 | `InternalError`       | 500    | `AppError::internal_error(error, message)`                     |
 | `Unavailable`         | 503    | Direct construction                                            |
 
+**From sqlx:** `AppError::from_sqlx(e, "shop")` maps a `sqlx::Error`:
+
+| sqlx error                                        | Status |
+| ------------------------------------------------- | ------ |
+| `RowNotFound`                                     | 404    |
+| Postgres `23505` (unique violation)               | 409    |
+| Postgres `23503`, `23502`, `23514` (FK, null, check) | 422 |
+| `PoolTimedOut`, `PoolClosed`                      | 503    |
+| anything else                                     | 500    |
+
 `InternalError` responses are **sanitized by default** — no leaked SQL or infra
 details.
 
@@ -1378,6 +1390,139 @@ let iso = offset_dt.to_iso_string()?;
 // Pagination query params (for Axum extractors)
 let params = PaginationParams { page_number: Some(1), page_size: Some(20) };
 ```
+
+---
+
+### Service
+
+Enable with the `service` feature.
+
+**The idea:** one binary, many services, real boundaries. A modular monolith
+keeps the deploy simple, but in one crate nothing stops one service from calling
+another's SQL or helpers, and over time every service reaches into every other.
+Split each service into its own Cargo crate and Rust's privacy rules become the
+boundary: a path into another crate's private module is a compile error (E0603),
+not a review comment.
+
+`arche::service` is the small contract those crates share:
+
+- **`Service`** — what every service crate implements: a `name()` and a
+  `build_router()`. The binary builds each service, then merges their routes.
+- **`Routes`** — the only way a service adds a route. A public route must say
+  why it is public, and every route lands in a table (`Routes::table()`) you
+  can snapshot, so a new unguarded endpoint shows up in review.
+
+The service owns its state: handlers receive the service itself
+(`State<Arc<DeviceService>>`), not a shared application struct, so a handler
+can only use what its service was built with.
+
+```toml
+arche = { version = "4", features = ["service"] }
+```
+
+```rust
+use std::sync::Arc;
+
+use arche::axum::{extract::State, routing::get};
+use arche::service::{Routes, Service};
+
+struct DeviceService;
+
+async fn info(State(_svc): State<Arc<DeviceService>>) -> &'static str {
+    "ok"
+}
+
+impl Service for DeviceService {
+    fn name(&self) -> &'static str {
+        "device"
+    }
+
+    fn build_router(self: Arc<Self>) -> Routes {
+        Routes::new()
+            .public("/device/info", get(info), "network info, no caller data")
+            .with_state(self)
+    }
+}
+
+let services: Vec<Arc<dyn Service>> = vec![Arc::new(DeviceService)];
+let app = services
+    .into_iter()
+    .fold(arche::axum::Router::new(), |app, svc| app.merge(svc.build_router().into_router()));
+```
+
+`Routes` follows axum's own pattern: routes first, `.with_state(...)` last. That
+keeps `Service` object-safe, so the binary can hold every service as
+`Arc<dyn Service>`. Global layers (tracing, CORS, timeouts) stay with the
+binary, applied to the merged router.
+
+---
+
+### Architecture
+
+Enable with the `architecture` feature, as a **dev-dependency only**.
+
+**The idea:** a rule that is not checked is a suggestion. The compiler already
+enforces that nobody reaches into a crate's private modules, but it happily
+accepts a crate that makes everything public, or one that opts out of the
+workspace's lints. `arche::architecture` closes those gaps with ordinary
+`#[test]`s: it reads the workspace through `cargo metadata`, parses source with
+`syn` (so formatting and comments can't hide anything), and returns findings a
+test asserts on.
+
+Every crate declares its role, and a crate without one fails to load, so a new
+crate can't slip past the checks:
+
+```toml
+[package.metadata.arche]
+role = "service" # or "core", "fakes", "app"
+```
+
+| Check                                             | Flags                                                                                     |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `checks::find_extra_exports(ws, allowed)`         | Any `pub` item in a service crate's `lib.rs` not in `allowed`; macro calls and exported macros too |
+| `checks::find_crates_without_workspace_lints(ws)` | A crate missing `[lints] workspace = true`, which silently switches off the workspace's lint settings |
+
+Checks fail closed: a file that doesn't parse is an error, and anything the
+check can't judge (a renamed re-export, an inline `pub mod`, a macro call at
+the crate root) is reported rather than skipped.
+
+**Allowlists** let you adopt a rule on an existing codebase without fixing
+everything first. `Allowlist::load(ws, rule)` reads
+`architecture/allowlists/<rule>.txt`, one finding per line (`#` starts a
+comment). `assert_clean` fails on a finding that isn't listed, and also on a
+listed one that no longer occurs, so the list can only shrink. Findings carry
+no line numbers, so edits elsewhere in a file don't break the list.
+
+```toml
+[dev-dependencies]
+arche = { version = "4", features = ["architecture"] }
+```
+
+```rust
+use std::path::Path;
+
+use arche::architecture::{Allowlist, ArchError, Workspace, checks};
+
+#[test]
+fn should_expose_only_api_adapters_and_build() -> Result<(), ArchError> {
+    let ws = Workspace::load(Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let allowed = ["pub mod api", "pub mod adapters", "pub use api::build"];
+    let found = checks::find_extra_exports(&ws, &allowed)?;
+    Allowlist::load(&ws, "exports")?.assert_clean("only api, adapters and build are public", &found);
+    Ok(())
+}
+```
+
+A failure names the crate, the item and the file:
+
+```text
+exports: only api, adapters and build are public
+
+returns: pub mod storage  (crates/returns/src/lib.rs)
+```
+
+Rule names and allowed lists come from your project; arche only provides the
+checks.
 
 ---
 

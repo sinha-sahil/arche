@@ -1,0 +1,8 @@
+[package]
+name = "returns"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[package.metadata.arche]
+role = "service"
