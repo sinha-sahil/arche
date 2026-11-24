@@ -2,7 +2,9 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::http::header::WWW_AUTHENTICATE;
 use axum::response::{IntoResponse, Response};
+use sqlx::Error as SqlxError;
 use std::collections::HashMap;
+use tracing::{error, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum AppError {
@@ -126,6 +128,32 @@ impl AppError {
         Self::InternalError { error, message }
     }
 
+    pub fn from_sqlx(e: SqlxError, context: &str) -> Self {
+        match &e {
+            SqlxError::RowNotFound => Self::not_found(context),
+            SqlxError::Database(db_err) => match db_err.code().as_deref() {
+                Some("23505") => Self::conflict(format!("{context}: duplicate entry")),
+                Some("23503") | Some("23502") | Some("23514") => Self::unprocessable_entity(
+                    None,
+                    Some(format!("{context}: constraint violation")),
+                    None,
+                ),
+                _ => {
+                    error!(error = %e, context, "unexpected database error");
+                    Self::internal_error(format!("{context} failed"), None)
+                }
+            },
+            SqlxError::PoolTimedOut | SqlxError::PoolClosed => {
+                warn!(error = %e, "database pool unavailable");
+                Self::Unavailable
+            }
+            _ => {
+                error!(error = %e, context, "database error");
+                Self::internal_error(format!("{context} failed"), None)
+            }
+        }
+    }
+
     pub fn is_dependency_error(&self) -> bool {
         matches!(self, Self::DependencyFailed { .. })
     }
@@ -207,7 +235,7 @@ impl IntoResponse for AppError {
                 detail,
                 retryable,
             } => {
-                tracing::warn!(
+                warn!(
                     upstream = %upstream,
                     detail = %detail,
                     retryable,
@@ -226,7 +254,7 @@ impl IntoResponse for AppError {
             }
 
             Self::InternalError { error, message } => {
-                tracing::error!(internal_error = %error, message = ?message, "returning 500");
+                error!(internal_error = %error, message = ?message, "returning 500");
 
                 #[cfg(feature = "verbose-errors")]
                 let body = InternalErrorDetails { error, message };
@@ -356,3 +384,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/error/sqlx.rs"]
+mod sqlx_tests;

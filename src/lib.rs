@@ -1,3 +1,5 @@
+#[cfg(feature = "architecture")]
+pub mod architecture;
 pub mod aws;
 pub(crate) mod config;
 pub mod crypto;
@@ -11,6 +13,8 @@ pub mod middleware;
 pub mod oidc;
 #[cfg(feature = "queue")]
 pub mod queue;
+#[cfg(feature = "service")]
+pub mod service;
 pub mod sockets;
 pub mod utils;
 
