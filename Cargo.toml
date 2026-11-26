@@ -22,7 +22,7 @@ exclude = [".gitignore", ".vscode/*"]
 default = []
 verbose-errors = []
 queue = ["dep:rdkafka"]
-service = []
+service = ["dep:tower", "dep:tower-http"]
 architecture = ["dep:syn", "dep:cargo_metadata", "dep:toml"]
 
 [dependencies]
@@ -55,6 +55,7 @@ tokio = { version = "1.4.0", features = [
     "io-util",
     "fs",
     "sync",
+    "signal",
 ] }
 tokio-util = { version = "0.7", features = ["io-util"] }
 tokio-stream = "0.1"
@@ -69,6 +70,8 @@ cbc = { version = "0.1", features = ["alloc"] }
 pbkdf2 = "0.12"
 sha1 = "0.10"
 futures = "0.3"
+tower = { version = "0.5", features = ["util"], optional = true }
+tower-http = { version = "0.6", features = ["set-header"], optional = true }
 indexmap = { version = "2", features = ["serde"] }
 rsa = "0.9"
 senno = { version = "0.6.0", features = ["vertex", "axum", "mcp"] }
@@ -76,7 +79,7 @@ sha2 = { version = "0.10", features = ["oid"] }
 hex = "0.4"
 percent-encoding = "2.3"
 rdkafka = { version = "0.39", features = ["ssl-vendored", "zstd"], optional = true }
-syn = { version = "3.0.10", features = ["full"], optional = true }
+syn = { version = "3.0.10", features = ["full", "visit"], optional = true }
 cargo_metadata = { version = "0.23.1", optional = true }
 toml = { version = "1.2.2", optional = true }
 

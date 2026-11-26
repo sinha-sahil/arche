@@ -75,3 +75,29 @@ fn should_fail_when_a_listed_violation_is_fixed() {
         .expect("allowlist loads")
         .assert_clean("only api, adapters and build may be public in lib.rs", &[]);
 }
+
+#[test]
+fn should_flag_every_edge_inside_the_knot_when_modules_call_each_other() -> Result<(), ArchError> {
+    let ws = Workspace::load(&fixture("knot"))?;
+    let found = checks::find_module_cycle_edges(&ws, "crates/app/src/services", "crate::services")?;
+    assert_eq!(
+        list_ids(&found),
+        [
+            "auth -> plugin",
+            "cart -> auth",
+            "cart -> plugin",
+            "plugin -> cart"
+        ]
+    );
+    assert_eq!(found[0].at, "crates/app/src/services/auth.rs");
+    assert_eq!(found[2].at, "crates/app/src/services/cart/remote.rs");
+    Ok(())
+}
+
+#[test]
+fn should_pass_when_the_knot_has_no_new_edge() -> Result<(), ArchError> {
+    let ws = Workspace::load(&fixture("knot"))?;
+    let found = checks::find_module_cycle_edges(&ws, "crates/app/src/services", "crate::services")?;
+    Allowlist::load(&ws, "cycles")?.assert_clean("no new edge inside the service cycle", &found);
+    Ok(())
+}
